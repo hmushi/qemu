@@ -13,6 +13,7 @@
 #include "exec/hwaddr.h"
 #include "hw/core/cpu.h"
 #include "hw/hyperv/hyperv-proto.h"
+#include "hw/hyperv/vsm-plane-api.h"
 
 typedef struct HvSintRoute HvSintRoute;
 
@@ -61,6 +62,8 @@ int hyperv_set_event_flag_handler(uint32_t conn_id, EventNotifier *notifier);
 
 uint16_t hyperv_hcall_vtl_enable_partition_vtl(CPUState *cs, uint64_t param1,
                                                uint64_t param2, bool fast);
+
+uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param, bool fast);
 /*
  * Process HV_POST_MESSAGE hypercall: parse the data in the guest memory as
  * specified in @param, and call the HvMsgHandler associated with the
@@ -75,7 +78,15 @@ uint16_t hyperv_hcall_signal_event(uint64_t param, bool fast);
 
 static inline uint32_t hyperv_vp_index(CPUState *cs)
 {
-    return cs->cpu_index;
+    return cs->cc->get_arch_id(cs);
+}
+
+static inline CPUState *hyperv_vsm_vcpu(uint32_t arch_id, uint32_t vtl)
+{
+    /* plane API: sibling lookup; was cpu_by_arch_id(arch_id, namespace) */
+    CPUState *cs = hv_plane_vcpu(arch_id, vtl);
+    assert(cs);
+    return cs;
 }
 void hyperv_vp_vsm_add(CPUState *cs);
 
