@@ -101,6 +101,10 @@ int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
         uint64_t out_param = exit->u.hcall.params[1];
 
         switch (code) {
+        case HV_ENABLE_PARTITION_VTL:
+            exit->u.hcall.result = hyperv_hcall_vtl_enable_partition_vtl(CPU(cpu),
+                in_param, out_param, fast);
+            break;
         case HV_POST_MESSAGE:
             exit->u.hcall.result = hyperv_hcall_post_message(in_param, fast);
             break;
