@@ -6625,6 +6625,14 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
     case KVM_EXIT_HYPERV:
         ret = kvm_hv_handle_exit(cpu, &run->hyperv);
         break;
+    case KVM_EXIT_MEMORY_FAULT:
+        /*
+         * Not reached on current master: accel/kvm/kvm-all.c consumes
+         * KVM_EXIT_MEMORY_FAULT for guest_memfd (kvm_convert_memory). The RWX
+         * VTL fault dispatch needs a hook there before the private/shared
+         * conversion. Design decision for the planes re-targeting.
+         */
+        break;
     case KVM_EXIT_IOAPIC_EOI:
         ioapic_eoi_broadcast(run->eoi.vector);
         ret = 0;
