@@ -81,6 +81,11 @@ typedef struct kvm_msr_handlers {
     QEMUWRMSRHandler *wrmsr;
 } KVMMSRHandlers;
 
+void kvm_queue_exception(CPUX86State *env, int32_t exception_nr,
+                         uint8_t has_error_code, uint32_t error_code,
+                         uint8_t exception_has_payload,
+                         uint64_t exception_payload);
+
 int kvm_filter_msr(KVMState *s, uint32_t msr, QEMURDMSRHandler *rdmsr,
                    QEMUWRMSRHandler *wrmsr);
 
