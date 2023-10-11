@@ -42,6 +42,7 @@
 #include "tdx.h"
 #include "xen-emu.h"
 #include "hyperv.h"
+#include "hw/hyperv/vsm-kvm-abi-stub.h"
 #include "hyperv-proto.h"
 
 #include "gdbstub/enums.h"
@@ -5473,7 +5474,7 @@ static int kvm_get_msrs(X86CPU *cpu)
     return 0;
 }
 
-static int kvm_put_mp_state(X86CPU *cpu)
+int kvm_put_mp_state(X86CPU *cpu)
 {
     struct kvm_mp_state mp_state = { .mp_state = cpu->env.mp_state };
 
@@ -6632,6 +6633,9 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
          * VTL fault dispatch needs a hook there before the private/shared
          * conversion. Design decision for the planes re-targeting.
          */
+        ret = kvm_hv_handle_fault(cs, run->memory_fault.gpa, run->memory_fault.size,
+                                  run->memory_fault.flags,
+                                  hv_memory_fault_insn_len(run));
         break;
     case KVM_EXIT_IOAPIC_EOI:
         ioapic_eoi_broadcast(run->eoi.vector);
