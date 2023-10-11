@@ -58,6 +58,7 @@ void kvm_synchronize_all_tsc(void);
 
 void kvm_get_apic_state(APICCommonState *s, struct kvm_lapic_state *kapic);
 void kvm_put_apicbase(X86CPU *cpu, uint64_t value);
+void kvm_put_hv_vp_assist(X86CPU *cpu, uint64_t value);
 
 bool kvm_has_x2apic_api(void);
 bool kvm_has_waitpkg(void);
@@ -72,6 +73,17 @@ struct kvm_cpuid_entry2 *cpuid_find_entry(struct kvm_cpuid2 *cpuid,
 uint32_t cpuid_entry_get_reg(struct kvm_cpuid_entry2 *entry, int reg);
 uint32_t kvm_x86_build_cpuid(CPUX86State *env, struct kvm_cpuid_entry2 *entries,
                              uint32_t cpuid_i);
+typedef bool QEMURDMSRHandler(X86CPU *cpu, uint32_t msr, uint64_t *val);
+typedef bool QEMUWRMSRHandler(X86CPU *cpu, uint32_t msr, uint64_t val);
+typedef struct kvm_msr_handlers {
+    uint32_t msr;
+    QEMURDMSRHandler *rdmsr;
+    QEMUWRMSRHandler *wrmsr;
+} KVMMSRHandlers;
+
+int kvm_filter_msr(KVMState *s, uint32_t msr, QEMURDMSRHandler *rdmsr,
+                   QEMUWRMSRHandler *wrmsr);
+
 #endif /* CONFIG_KVM */
 
 void kvm_smm_cpu_address_space_init(X86CPU *cpu);
