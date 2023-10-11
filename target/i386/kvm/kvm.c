@@ -4238,6 +4238,8 @@ static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
                 kvm_msr_entry_add(cpu, MSR_IA32_PL0_SSP, env->pl0_ssp);
             }
         }
+        kvm_msr_entry_add(cpu, MSR_FSBASE, env->fsbase);
+        kvm_msr_entry_add(cpu, MSR_GSBASE, env->gsbase);
     }
 #endif
 
@@ -4824,6 +4826,8 @@ static int kvm_get_msrs(X86CPU *cpu)
                 kvm_msr_entry_add(cpu, MSR_IA32_PL0_SSP, 0);
             }
         }
+        kvm_msr_entry_add(cpu, MSR_FSBASE, 0);
+        kvm_msr_entry_add(cpu, MSR_GSBASE, 0);
     }
 #endif
     if (env->features[FEAT_KVM] & (CPUID_KVM_CLOCK | CPUID_KVM_CLOCK2)) {
@@ -5092,6 +5096,12 @@ static int kvm_get_msrs(X86CPU *cpu)
 #ifdef TARGET_X86_64
         case MSR_CSTAR:
             env->cstar = msrs[i].data;
+            break;
+        case MSR_GSBASE:
+            env->gsbase = msrs[i].data;
+            break;
+        case MSR_FSBASE:
+            env->fsbase = msrs[i].data;
             break;
         case MSR_KERNELGSBASE:
             env->kernelgsbase = msrs[i].data;

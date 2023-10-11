@@ -2086,6 +2086,8 @@ typedef struct CPUArchState {
     uint64_t fred_ssp2;
     uint64_t fred_ssp3;
     uint64_t fred_config;
+    uint64_t gsbase;
+    uint64_t fsbase;
 #endif
 
     /* CET MSRs and register */
