@@ -25,6 +25,8 @@
 #include "qemu/rcu.h"
 #include "qemu/rcu_queue.h"
 #include "hw/hyperv/hyperv.h"
+#include "hw/hyperv/vsm-plane-api.h"
+#include "hw/hyperv/vsm-kvm-abi-stub.h"
 #include "qom/object.h"
 #include "target/i386/kvm/hyperv-proto.h"
 
@@ -49,6 +51,11 @@ struct SynICState {
 OBJECT_DECLARE_SIMPLE_TYPE(SynICState, SYNIC)
 
 static bool synic_enabled;
+
+static int get_active_vtl(CPUState *cpu)
+{
+    return hv_plane_active_vtl(cpu);
+}
 
 static MemTxResult hyperv_physmem_write(CPUState *cs, hwaddr addr,
                                         const void *buf, hwaddr len)
