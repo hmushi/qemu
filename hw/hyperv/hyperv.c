@@ -273,11 +273,6 @@ struct HvSintRoute {
     QLIST_ENTRY(HvSintRoute) link;
 };
 
-static CPUState *hyperv_find_vcpu(uint32_t vp_index)
-{
-    return qemu_get_cpu(vp_index);
-}
-
 /*
  * BH to complete the processing of a staged message.
  */
@@ -441,7 +436,7 @@ static int kvm_irqchip_add_hv_sint_route(KVMState *s, uint32_t vcpu, uint32_t si
     return virq;
 }
 
-HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint32_t sint,
+HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint,
                                    HvSintMsgCb cb, void *cb_data)
 {
     HvSintRoute *sint_route = NULL;
@@ -451,7 +446,7 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint32_t sint,
     SynICState *synic;
     bool ack_event_initialized = false;
 
-    cs = hyperv_find_vcpu(vp_index);
+    cs = hyperv_vsm_vcpu(vp_index, vtl);
     if (!cs) {
         return NULL;
     }
@@ -498,12 +493,12 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint32_t sint,
         goto cleanup_err_sint;
     }
 
-    gsi = kvm_irqchip_add_hv_sint_route(kvm_state, vp_index, sint);
+    gsi = kvm_irqchip_add_hv_sint_route(hv_plane_kvm_state(cs), vp_index, sint);
     if (gsi < 0) {
         goto cleanup_err_sint_notifier;
     }
 
-    r = kvm_irqchip_add_irqfd_notifier_gsi(kvm_state,
+    r = kvm_irqchip_add_irqfd_notifier_gsi(hv_plane_kvm_state(cs),
                                            &sint_route->sint_set_notifier,
                                            ack_notifier, gsi);
     if (r) {
@@ -517,7 +512,7 @@ cleanup:
     return sint_route;
 
 cleanup_err_irqfd:
-    kvm_irqchip_release_virq(kvm_state, gsi);
+    kvm_irqchip_release_virq(hv_plane_kvm_state(cs), gsi);
 
 cleanup_err_sint_notifier:
     event_notifier_cleanup(&sint_route->sint_set_notifier);
