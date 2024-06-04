@@ -6671,6 +6671,10 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         case KVM_SYSTEM_EVENT_TDX_FATAL:
             ret = tdx_handle_report_fatal_error(cpu, run);
             break;
+        case KVM_SYSTEM_EVENT_WAKEUP:
+            /* needs kernel ABI: wakeup exit for a vCPU in KVM_MP_STATE_HV_INACTIVE_VTL */
+            ret = hyperv_vcpu_event_callback(cs);
+            break;
         default:
             ret = -1;
             break;

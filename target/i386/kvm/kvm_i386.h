@@ -89,6 +89,7 @@ void kvm_queue_exception(CPUX86State *env, int32_t exception_nr,
 int kvm_filter_msr(KVMState *s, uint32_t msr, QEMURDMSRHandler *rdmsr,
                    QEMUWRMSRHandler *wrmsr);
 
+int kvm_put_mp_state(X86CPU *cpu);
 #endif /* CONFIG_KVM */
 
 void kvm_smm_cpu_address_space_init(X86CPU *cpu);
