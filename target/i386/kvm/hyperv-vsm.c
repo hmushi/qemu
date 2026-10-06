@@ -697,12 +697,13 @@ int hyperv_vsm_vina_notify(CPUState *cs)
                    cs->cc->get_arch_id(cs) << MSI_ADDR_DEST_ID_SHIFT,
         .data = vpvsm->vina.vector,
     };
+    /* the handler reads vina_asserted, so it is set before the vector */
+    set_vina_asserted(cs, true);
     ret = hv_plane_send_msi(cs, msg);
     if (ret < 0) {
+        set_vina_asserted(cs, false);
         return ret;
     }
-    /* auto_reset: the assist bit is not left set across the delivery */
-    set_vina_asserted(cs, !vpvsm->vina.auto_reset);
     return 0;
 }
 
@@ -726,6 +727,11 @@ void hyperv_vsm_vtl_switch_state(CPUState *prev, CPUState *next,
             read_vtl_control(prev, &ctl);
             next_env->regs[R_EAX] = ctl.vtl_ret_x64rax;
             next_env->regs[R_ECX] = ctl.vtl_ret_x64rcx;
+            /* auto_reset: the VINA is consumed by the return it caused */
+            if (ctl.vina_asserted && get_vp_vsm(prev)->vina.auto_reset) {
+                ctl.vina_asserted = 0;
+                write_vtl_control(prev, &ctl);
+            }
         }
         return;
     }
