@@ -61,6 +61,8 @@ struct VpVsmState {
     void *hypercall_page;
     HvSintRoute *intercept_route;
     struct hyperv_message intercept_msg;
+    /* HvRegisterVsmVina: stored for read-back; no VINA is delivered */
+    uint64_t vina;
 };
 
 #define TYPE_VP_VSM "hyperv-vp-vsm"
@@ -79,6 +81,12 @@ static int active_vtl(CPUState *cs)
 static CPUState *sibling(CPUState *cs, int vtl)
 {
     return hv_plane_vcpu(hyperv_vp_index(cs), vtl);
+}
+
+/* HV_INPUT_VTL names a target VTL; 0xff (securekernel) means the caller's */
+static bool input_vtl_targets(union hv_input_vtl in_vtl)
+{
+    return in_vtl.use_target_vtl && in_vtl.as_uint8 != 0xff;
 }
 
 static MemTxResult vsm_physmem_write(CPUState *cs, hwaddr addr,
@@ -311,6 +319,7 @@ static void hyperv_vsm_reset(void *opaque)
             vpvsm->intercept_route = NULL;
         }
         memset(vpvsm->vtl_config, 0, sizeof(vpvsm->vtl_config));
+        vpvsm->vina = 0;
         vpvsm->vp_status.as_uint64 = 0;
         vpvsm->vp_status.enabled_vtl_set = BIT(0);
         vpvsm->vp_status.active_vtl = active_vtl(cs);
@@ -957,6 +966,10 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
     case HV_REGISTER_VSM_CODE_PAGE_OFFSETS:
         val->low_part = hv_vsm.code_page_offsets.as_uint64;
         break;
+    case HV_REGISTER_VSM_VINA:
+        /* VINA is not delivered; the register reads back as written */
+        val->low_part = vpvsm->vina;
+        break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: GetVpRegisters: unknown "
                       "register 0x%x\n", name);
@@ -1083,6 +1096,10 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         setup_vp_assist(target_vcpu, val->low_part);
         break;
     case HV_REGISTER_VSM_VINA:
+        get_vp_vsm(target_vcpu)->vina = val->low_part;
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VINA 0x%" PRIx64 " stored, not "
+                      "delivered\n", val->low_part);
+        break;
     case HV_X64_REGISTER_CR_INTERCEPT_CONTROL:
     case HV_X64_REGISTER_CR_INTERCEPT_CR0_MASK:
     case HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK:
@@ -1189,7 +1206,7 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
         return HV_STATUS_INVALID_PARTITION_ID;
     }
 
-    if (input.input_vtl.use_target_vtl) {
+    if (input_vtl_targets(input.input_vtl)) {
         vtl = input.input_vtl.target_vtl;
         if (vtl >= HV_NUM_VTLS) {
             return HV_STATUS_INVALID_HYPERCALL_INPUT;
@@ -1320,7 +1337,7 @@ uint64_t hyperv_hcall_translate_virtual_address(CPUState *cs,
 
     in_vtl.as_uint8 = input.control_flags >> HV_TRANSLATE_GVA_INPUT_VTL_SHIFT;
     flags = input.control_flags & HV_TRANSLATE_GVA_FLAGS_MASK;
-    if (in_vtl.use_target_vtl) {
+    if (input_vtl_targets(in_vtl)) {
         target_vtl = in_vtl.target_vtl;
         if (target_vtl > active_vtl(cs)) {
             return HV_STATUS_INVALID_VP_STATE;
@@ -1726,7 +1743,7 @@ uint64_t hyperv_hcall_vtl_protection_mask(CPUState *cs,
     }
 
     /* protections apply to a lower VTL; default is the one right below */
-    if (input.input_vtl.use_target_vtl) {
+    if (input_vtl_targets(input.input_vtl)) {
         target_vtl = input.input_vtl.target_vtl;
         if (target_vtl >= active_vtl(cs)) {
             return HV_STATUS_ACCESS_DENIED;
