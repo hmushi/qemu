@@ -628,43 +628,18 @@ void hv_plane_import_shared_state(CPUState *cs, const HvVtlSharedState *st)
 }
 
 /*
- * auto_eoi: the VINA vector is delivered without an EOI from the guest.
- * KVM_HYPERV_SET_AUTO_EOI marks the vector on the VTL's own vCPU fd so its
- * LAPIC never sets ISR for it. The mark follows the register: set while
- * enabled && auto_eoi, cleared otherwise and moved on a vector change.
+ * auto_eoi asks for the VINA vector to be delivered without an EOI. The
+ * vector is deliberately NOT marked with KVM_HYPERV_SET_AUTO_EOI: a marked
+ * vector is held in the kernel's own queue and never enters the IRR, and
+ * the secure kernel stops making progress after the first notification.
+ * The register is still stored and read back as written.
  */
-static void set_vina_auto_eoi(CPUState *cs, uint8_t vector, bool set)
-{
-    struct kvm_hyperv_auto_eoi arg = {
-        .vector = vector,
-        .set = set ? KVM_HYPERV_AUTO_EOI_SET : KVM_HYPERV_AUTO_EOI_CLEAR,
-    };
-    int ret = kvm_vcpu_ioctl(cs, KVM_HYPERV_SET_AUTO_EOI, &arg);
-
-    if (ret < 0) {
-        error_report("hyperv-vsm: VP %u VTL%d: %s auto-EOI for vector 0x%x: "
-                     "%s", hyperv_vp_index(cs), active_vtl(cs),
-                     set ? "set" : "clear", vector, strerror(-ret));
-    }
-}
-
 static void set_vina(CPUState *cs, uint64_t data)
 {
     VpVsmState *vpvsm = get_vp_vsm(cs);
-    union hv_register_vsm_vina old = vpvsm->vina;
-    union hv_register_vsm_vina new = { .as_uint64 = data };
-    bool old_mark = old.enabled && old.auto_eoi;
-    bool new_mark = new.enabled && new.auto_eoi;
 
-    vpvsm->vina = new;
+    vpvsm->vina.as_uint64 = data;
     trace_hyperv_vsm_vina_config(hyperv_vp_index(cs), active_vtl(cs), data);
-
-    if (old_mark && (!new_mark || old.vector != new.vector)) {
-        set_vina_auto_eoi(cs, old.vector, false);
-    }
-    if (new_mark && (!old_mark || old.vector != new.vector)) {
-        set_vina_auto_eoi(cs, new.vector, true);
-    }
 }
 
 /*
