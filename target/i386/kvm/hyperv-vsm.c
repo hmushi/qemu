@@ -26,6 +26,8 @@
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/i386/apic_internal.h"
+#include "hw/i386/apic-msidef.h"
+#include "hw/pci/msi.h"
 #include "hw/hyperv/hyperv.h"
 #include "cpu.h"
 #include "kvm_i386.h"
@@ -63,7 +65,7 @@ struct VpVsmState {
     void *hypercall_page;
     HvSintRoute *intercept_route;
     struct hyperv_message intercept_msg;
-    /* HvRegisterVsmVina: stored for read-back; no VINA is delivered */
+    /* HvRegisterVsmVina (TLFS 15.6.5) */
     union hv_register_vsm_vina vina;
 };
 
@@ -618,6 +620,70 @@ void hv_plane_import_shared_state(CPUState *cs, const HvVtlSharedState *st)
     }
 }
 
+/*
+ * VINA (TLFS 15.2.3): while a VTL with VINA enabled runs, a lower VTL's
+ * pending interrupt is notified to it by asserting vina.vector in its own
+ * LAPIC and setting vina_asserted in its VP assist page. Nothing is
+ * notified again until vina_asserted is clear: the guest clears it, or
+ * auto_reset clears it when the VINA interrupt is delivered (which this
+ * implementation takes as the moment the vector is injected).
+ */
+static bool vina_asserted(CPUState *cs)
+{
+    struct hv_vp_vtl_control ctl;
+
+    if (!vp_assist_enabled(cs)) {
+        return false;
+    }
+    read_vtl_control(cs, &ctl);
+    return ctl.vina_asserted;
+}
+
+static void set_vina_asserted(CPUState *cs, bool asserted)
+{
+    struct hv_vp_vtl_control ctl;
+
+    if (!vp_assist_enabled(cs)) {
+        return;
+    }
+    read_vtl_control(cs, &ctl);
+    ctl.vina_asserted = asserted;
+    write_vtl_control(cs, &ctl);
+}
+
+bool hyperv_vsm_vina_armed(CPUState *cs)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    return vpvsm && vpvsm->vina.enabled && !vina_asserted(cs);
+}
+
+int hyperv_vsm_vina_notify(CPUState *cs)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+    MSIMessage msg;
+    int ret;
+
+    if (!vpvsm || !vpvsm->vina.enabled || vina_asserted(cs)) {
+        return 0;
+    }
+
+    trace_hyperv_vsm_vina_notify(hyperv_vp_index(cs), active_vtl(cs),
+                                 vpvsm->vina.vector);
+    msg = (MSIMessage) {
+        .address = APIC_DEFAULT_ADDRESS |
+                   cs->cc->get_arch_id(cs) << MSI_ADDR_DEST_ID_SHIFT,
+        .data = vpvsm->vina.vector,
+    };
+    ret = hv_plane_send_msi(cs, msg);
+    if (ret < 0) {
+        return ret;
+    }
+    /* auto_reset: the assist bit is not left set across the delivery */
+    set_vina_asserted(cs, !vpvsm->vina.auto_reset);
+    return 0;
+}
+
 void hyperv_vsm_vtl_switch_state(CPUState *prev, CPUState *next,
                                  HvPlaneSwitchReason reason)
 {
@@ -1150,12 +1216,8 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         union hv_register_vsm_vina *vina = &get_vp_vsm(target_vcpu)->vina;
 
         vina->as_uint64 = val->low_part;
-        if (vina->enabled) {
-            qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VINA vector 0x%x enabled on "
-                          "VP %u VTL%d, not delivered\n",
-                          (unsigned)vina->vector, hyperv_vp_index(target_vcpu),
-                          active_vtl(target_vcpu));
-        }
+        trace_hyperv_vsm_vina_config(hyperv_vp_index(target_vcpu),
+                                     active_vtl(target_vcpu), val->low_part);
         break;
     }
     case HV_X64_REGISTER_CR_INTERCEPT_CONTROL:

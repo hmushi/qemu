@@ -63,6 +63,11 @@ CPUState *hv_plane_vcpu(uint32_t vp_index, int vtl)
 void hv_plane_reset(void)
 {
 }
+
+int hv_plane_send_msi(CPUState *cs, MSIMessage msg)
+{
+    return -ENOSYS;
+}
 #endif
 
 int hyperv_vsm_init_vcpu(X86CPU *cpu)

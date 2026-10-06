@@ -45,5 +45,7 @@ hyperv_vsm_hcall_start_virtual_processor(uint64_t partition_id, uint32_t vp_inde
 hyperv_vsm_plane_create(int vtl, int ret) "VTL%d plane created: %d"
 hyperv_vsm_plane_vcpu_create(uint32_t vp_index, int vtl, bool ok) "VP %u VTL%d created: %d"
 hyperv_vsm_plane_vcpu_start(uint32_t vp_index, int vtl) "VP %u starts in VTL%d"
+hyperv_vsm_vina_config(uint32_t vp_index, int vtl, uint64_t val) "VP %u VTL%d VINA 0x%" PRIx64
+hyperv_vsm_vina_notify(uint32_t vp_index, int vtl, unsigned vector) "VP %u VTL%d VINA vector 0x%x"
 hyperv_vsm_plane_vtl_event(uint32_t vp_index, int vtl, uint32_t cause, uint32_t plane, uint64_t extra) "VP %u running VTL%d: plane event cause %u plane %u extra 0x%" PRIx64
 hyperv_vsm_plane_run_vtl(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"

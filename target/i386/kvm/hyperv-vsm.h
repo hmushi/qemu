@@ -75,4 +75,13 @@ struct HvVtlSharedState {
 void hyperv_vsm_vtl_switch_state(CPUState *prev, CPUState *next,
                                  HvPlaneSwitchReason reason);
 
+/*
+ * VINA (TLFS 15.2.3). hyperv_vsm_vina_armed(): VTL @cs wants to be told
+ * about a lower VTL's pending interrupt (VINA enabled, not yet asserted).
+ * hyperv_vsm_vina_notify(): assert it (inject the VINA vector into @cs's
+ * LAPIC, set vina_asserted in its VP assist page). Both on @cs's thread.
+ */
+bool hyperv_vsm_vina_armed(CPUState *cs);
+int hyperv_vsm_vina_notify(CPUState *cs);
+
 #endif /* TARGET_I386_KVM_HYPERV_VSM_H */

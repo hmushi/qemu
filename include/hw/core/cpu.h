@@ -472,6 +472,8 @@ struct qemu_work_item;
  * @kvm_plane_next: on the leader, singly linked list of its plane > 0 vCPUs.
  * @kvm_plane_active: on the leader, the CPUState the thread runs next (the
  *    leader itself or one of its plane vCPUs).
+ * @kvm_plane_vina_armed: on a plane vCPU, whether the last KVM_RUN asked
+ *    to be told about lower planes' interrupts (Hyper-V VINA).
  *
  * @neg_align: The CPUState is the common part of a concrete ArchCPU
  * which is allocated when an individual CPU instance is created. As
@@ -557,6 +559,7 @@ struct CPUState {
     struct CPUState *kvm_plane_leader;
     struct CPUState *kvm_plane_next;
     struct CPUState *kvm_plane_active;
+    bool kvm_plane_vina_armed;
 
     /* Use by accel-block: CPU is executing an ioctl() */
     QemuLockCnt in_ioctl_lock;

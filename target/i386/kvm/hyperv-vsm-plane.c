@@ -30,6 +30,7 @@
 #include "hw/core/boards.h"
 #include "hw/hyperv/hyperv.h"
 #include "hw/i386/apic_internal.h"
+#include "hw/pci/msi.h"
 #include "cpu.h"
 #include "kvm_i386.h"
 #include "hyperv-vsm.h"
@@ -312,6 +313,8 @@ int hv_plane_run_vtl(CPUState *cs, int target_vtl, HvPlaneSwitchReason reason)
      * A VtlCall or VtlReturn exit is completed by the kernel without reading
      * the shared kvm_run page; every other exit was completed before.
      */
+    /* the kernel reports lower interrupts afresh after a switch (no re-arm) */
+    target->kvm_plane_vina_armed = hyperv_vsm_vina_armed(target);
     target->halted = 0;
     kvm_plane_select(target);
 
@@ -319,10 +322,50 @@ int hv_plane_run_vtl(CPUState *cs, int target_vtl, HvPlaneSwitchReason reason)
     return EXCP_INTERRUPT;
 }
 
+int hv_plane_send_msi(CPUState *cs, MSIMessage msg)
+{
+    struct kvm_msi msi = {
+        .address_lo = (uint32_t)msg.address,
+        .address_hi = msg.address >> 32,
+        .data = le32_to_cpu(msg.data),
+    };
+
+    if (!cs->kvm_plane) {
+        return kvm_irqchip_send_msi(kvm_state, msg);
+    }
+    /* KVM_SIGNAL_MSI on the plane fd delivers to that plane's LAPICs */
+    return kvm_plane_ioctl(cs->kvm_plane, KVM_SIGNAL_MSI, &msi);
+}
+
+/*
+ * VINA arming. The kernel reports a lower plane's interrupt once per
+ * 0 -> 1 transition of its req_exit_planes bit, or once per "became
+ * pending" edge while the bit stays set. After the guest clears
+ * vina_asserted the next lower interrupt must be reported again even if
+ * it never went away, so the bit is dropped for one KVM_RUN when the VTL
+ * goes from asserted back to armed (kvm_plane_vina_armed tracks the
+ * previous state).
+ */
+static uint16_t vina_lower_planes(CPUState *cs, struct kvm_run *run)
+{
+    bool armed = hyperv_vsm_vina_armed(cs);
+    bool rearm = armed && !cs->kvm_plane_vina_armed;
+
+    cs->kvm_plane_vina_armed = armed;
+    if (!armed || rearm) {
+        return 0;
+    }
+    return BIT(cs->kvm_plane) - 1;
+}
+
 void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
 {
     /* a higher VTL's pending interrupt ends this VTL's run (TLFS 15.3) */
     run->req_exit_planes = higher_planes(cs, cs->kvm_plane);
+    /* a lower VTL's pending interrupt is notified by VINA (TLFS 15.2.3) */
+    if (cs->kvm_plane) {
+        run->req_exit_planes |= vina_lower_planes(cs, run);
+    }
 }
 
 int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run)
@@ -342,6 +385,16 @@ int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run)
         }
         return hv_plane_run_vtl(cs, 31 - clz32(pending),
                                 HV_PLANE_SWITCH_INTERRUPT);
+    case KVM_PLANE_EVENT_LOWER_INTERRUPT:
+        /*
+         * A lower VTL's interrupt became pending while this VTL runs:
+         * notify, keep running this plane. The lower VTL takes its
+         * interrupt itself on VtlReturn; VINA does not consume it.
+         */
+        if (ev->extra[0] & (BIT(cs->kvm_plane) - 1)) {
+            hyperv_vsm_vina_notify(cs);
+        }
+        return 0;
     case KVM_PLANE_EVENT_CREATE_VCPU:
         /* SNP AP creation; Hyper-V VTLs create their vCPUs from userspace */
         qemu_log_mask(LOG_UNIMP, "hyperv-vsm: unexpected plane vCPU creation "

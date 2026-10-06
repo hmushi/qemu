@@ -67,6 +67,7 @@
 #include "hw/core/cpu.h"
 #include "exec/hwaddr.h"
 #include "system/kvm.h"
+#include "hw/pci/msi.h"
 #include "hw/hyperv/vsm-kvm-abi-stub.h"
 
 /*
@@ -106,6 +107,13 @@ CPUState *hv_plane_vcpu(uint32_t vp_index, int vtl);
  * dispatches on the faulting vCPU's plane.
  */
 KVMState *hv_plane_kvm_state(CPUState *cs);
+
+/*
+ * hv_plane_send_msi: deliver @msg to the LAPIC of @cs's plane (the VINA
+ * vector of a higher VTL). Maps to KVM_SIGNAL_MSI on the plane fd; plane 0
+ * uses the VM fd. Returns 0 or -errno.
+ */
+int hv_plane_send_msi(CPUState *cs, MSIMessage msg);
 
 /*
  * hv_plane_create: create the plane for @vtl (HvCallEnablePartitionVtl).
@@ -247,9 +255,11 @@ int hv_plane_run_vtl(CPUState *cs, int vtl, HvPlaneSwitchReason reason);
  * terms: the run loop returned because of it.)
  *
  * Called by kvm.c from the KVM exit path of the vCPU that reported it:
- * KVM_EXIT_PLANE_EVENT cause INTERRUPT on the running plane's KVM_RUN, @cs
- * the running (lower) plane, the pending planes in run->plane_event.extra[0]
- * (a req_exit_planes bitmap). The implementation calls
+ * KVM_EXIT_PLANE_EVENT on the running plane's KVM_RUN, @cs the running
+ * plane, the planes in run->plane_event.extra[0] (a req_exit_planes
+ * bitmap). Cause LOWER_INTERRUPT: a lower plane's interrupt became pending,
+ * VINA notifies @cs and it keeps running. Cause INTERRUPT: the
+ * implementation calls
  * hv_plane_run_vtl(@cs, highest such plane, HV_PLANE_SWITCH_INTERRUPT),
  * because a higher VTL's interrupt preempts a lower VTL (TLFS 15.3) and a
  * lower VTL's interrupt waits.
@@ -260,8 +270,11 @@ int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run);
 /*
  * hv_plane_pre_run: called by kvm_arch_pre_run() right before KVM_RUN on a
  * CPUState that has planes (a leader with plane vCPUs, or a plane vCPU).
- * Writes kvm_run->req_exit_planes and does the per-entry bookkeeping of
- * the switch (accel/kvm writes kvm_run->plane). No ioctl.
+ * Writes kvm_run->req_exit_planes: the higher planes (their interrupt ends
+ * this run, hv_plane_vtl_event() switches) and, when this VTL has VINA
+ * armed (hyperv_vsm_vina_armed()), the lower planes (their interrupt is
+ * notified with hyperv_vsm_vina_notify(), this plane keeps running).
+ * accel/kvm writes kvm_run->plane. No ioctl.
  */
 void hv_plane_pre_run(CPUState *cs, struct kvm_run *run);
 
