@@ -1489,6 +1489,7 @@ uint64_t x86_cpu_get_supported_feature_word(X86CPU *cpu, FeatureWord w);
 #define HYPERV_FEAT_TLBFLUSH_DIRECT     20
 #define HYPERV_FEAT_XMM_OUTPUT          21
 #define HYPERV_FEAT_VSM                 22
+#define HYPERV_FEAT_VSM_START_VP        23
 
 #ifndef HYPERV_SPINLOCK_NEVER_NOTIFY
 #define HYPERV_SPINLOCK_NEVER_NOTIFY             0xFFFFFFFF
@@ -2370,6 +2371,7 @@ struct ArchCPU {
     uint64_t hyperv_features;
     bool hyperv_passthrough;
     OnOffAuto hyperv_no_nonarch_cs;
+    OnOffAuto hyperv_vsm_start_vp;
     uint32_t hyperv_vendor_id[3];
     uint32_t hyperv_interface_id[4];
     uint32_t hyperv_limits[3];

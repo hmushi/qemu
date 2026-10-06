@@ -257,6 +257,15 @@ Existing enlightenments
 
   Requires: ``hv-synic``, ``-machine kernel-irqchip=split``
 
+``hv-vsm-start-vp``
+  Advertise the StartVirtualProcessor privilege, which ``hv-vsm`` does by
+  default. Windows starts its application processors with
+  HvCallStartVirtualProcessor instead of INIT/SIPI when it sees the
+  privilege. Set it to ``off`` to bring up the rest of VSM against a guest
+  that starts its processors the architectural way.
+
+  Requires: ``hv-vsm``
+
 ``hv-tlbflush-ext``
   Allow for extended GVA ranges to be passed to Hyper-V TLB flush hypercalls
   (HvFlushVirtualAddressList/HvFlushVirtualAddressListEx).

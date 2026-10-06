@@ -1148,9 +1148,18 @@ static struct {
        .desc = "VSM support",
        .flags = {
            {.func = HV_CPUID_FEATURES, .reg = R_EBX,
-            .bits = HV_ACCESS_VSM | HV_ACCESS_VP_REGS | HV_START_VP},
+            .bits = HV_ACCESS_VSM | HV_ACCESS_VP_REGS},
        },
        .dependencies = BIT(HYPERV_FEAT_SYNIC)
+    },
+    [HYPERV_FEAT_VSM_START_VP] = {
+       .desc = "VSM virtual processor start (hv-vsm-start-vp)",
+       .flags = {
+           {.func = HV_CPUID_FEATURES, .reg = R_EBX,
+            .bits = HV_START_VP},
+       },
+       .dependencies = BIT(HYPERV_FEAT_VSM),
+       .skip_passthrough = true,
     },
 };
 
@@ -1552,6 +1561,28 @@ bool kvm_hyperv_expand_features(X86CPU *cpu, Error **errp)
                 return false;
             }
         }
+    }
+
+    /*
+     * The StartVirtualProcessor privilege comes with hv-vsm, as Hyper-V
+     * grants it to a VSM partition. Windows starts its application
+     * processors with the hypercall once it sees the bit, so turning the
+     * privilege off is a way to reach the rest of VSM with a guest that
+     * starts its processors the architectural way.
+     */
+    if (cpu->hyperv_vsm_start_vp != ON_OFF_AUTO_OFF &&
+        hyperv_feat_enabled(cpu, HYPERV_FEAT_VSM)) {
+        cpu->hyperv_features |= BIT(HYPERV_FEAT_VSM_START_VP);
+        if (!hyperv_feature_supported(cs, HYPERV_FEAT_VSM_START_VP)) {
+            error_setg(errp, "Hyper-V %s is not supported by kernel",
+                       kvm_hyperv_properties[HYPERV_FEAT_VSM_START_VP].desc);
+            return false;
+        }
+    } else if (cpu->hyperv_vsm_start_vp == ON_OFF_AUTO_ON) {
+        error_setg(errp, "Hyper-V %s requires Hyper-V %s",
+                   kvm_hyperv_properties[HYPERV_FEAT_VSM_START_VP].desc,
+                   kvm_hyperv_properties[HYPERV_FEAT_VSM].desc);
+        return false;
     }
 
     /* Additional dependencies not covered by kvm_hyperv_properties[] */
