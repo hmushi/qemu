@@ -479,6 +479,24 @@ static void apic_force_enable_spiv(CPUState *cs)
 }
 
 /* Load an HV_INITIAL_VP_CONTEXT (TLFS 15.5.2) into @cs */
+/*
+ * HV_INITIAL_VP_CONTEXT carries no general-purpose or debug registers, and
+ * the INIT this path used to do cleared them. Keep that, so a VP the
+ * firmware already ran does not hand its leftovers to the context's first
+ * instruction, and leave the LAPIC and the SynIC alone, which the INIT also
+ * cleared and the hypercall never named. The x87 and vector state is not
+ * touched because it lives inside the INIT-preserved window of CPUX86State
+ * and so survived the old path too.
+ */
+static void reset_vp_scratch_regs(CPUState *cs)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+
+    memset(env->regs, 0, sizeof(env->regs));
+    memset(env->dr, 0, sizeof(env->dr));
+    env->cr[2] = 0;
+}
+
 static void load_vp_context(CPUState *cs, const struct hv_init_vp_context *c,
                             bool enable_spiv)
 {
@@ -2087,21 +2105,21 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
     /* the context describes a 64-bit VP; EFER.LMA follows from LME + PG */
     input.vp_context.efer |= MSR_EFER_LMA;
     /*
-     * The context this hypercall carries is registers only, so load that and
-     * touch no other per-VP state. An INIT here would clear state the caller
-     * never named and does not restore: the LAPIC, which apic_init_reset()
-     * leaves with SPIV clear and every LVT masked, and the SynIC control,
-     * message and event pages and interrupt source entries, which sit
-     * outside the INIT-preserved window of CPUX86State and so would reach
-     * KVM as zero through the synchronise below. Whatever the firmware or
-     * the guest left in them then stands, which is correct for a VP being
-     * restarted and identical to a reset for one started the first time,
-     * since that one holds its creation reset state. HvCallEnableVpVtl loads
-     * its context the same way.
+     * The context this hypercall carries is registers only. A full INIT here
+     * also clears state the caller never named and does not restore: the
+     * LAPIC, which apic_init_reset() leaves with SPIV clear and every LVT
+     * masked, and the SynIC control, message and event pages and interrupt
+     * source entries, which sit outside the INIT-preserved window of
+     * CPUX86State and so would reach KVM as zero through the synchronise
+     * below. Whatever the firmware or the guest left in those then stands,
+     * which is correct for a VP being restarted and identical to a reset for
+     * one started the first time, since that one holds its creation reset
+     * state.
      *
      * SPIV is forced on for a VTL>0 VP, whose secure kernel expects an
      * enabled APIC; a VTL0 VP enables its own, as after a SIPI.
      */
+    reset_vp_scratch_regs(vcpu);
     load_vp_context(vcpu, &input.vp_context, input.target_vtl > 0);
     cpu_synchronize_post_reset(vcpu);
 
