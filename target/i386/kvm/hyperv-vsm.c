@@ -849,6 +849,21 @@ static void set_vsm_partition_config(uint8_t vtl, uint64_t data)
                       "advertised, ignored\n");
     }
 
+    /*
+     * TLFS 15.6.3: the default mask is the protection of lower-VTL memory
+     * without an explicit ModifyVtlProtectionMask entry. Full access (RWX)
+     * is what the plane attributes give by default; a restrictive default
+     * would need attributes on every guest page. The Windows secure kernel
+     * and the kvm-unit-tests suite set RWX.
+     */
+    if (new_val.enable_vtl_protection && !cur->enable_vtl_protection &&
+        (new_val.default_vtl_protection_mask & HV_MAP_GPA_PERMISSIONS_MASK) !=
+        (HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE | HV_MAP_GPA_EXECUTABLE)) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VTL%d default protection mask "
+                      "0x%x not applied, lower VTLs keep full access\n", vtl,
+                      (unsigned)new_val.default_vtl_protection_mask);
+    }
+
     *cur = new_val;
 }
 
