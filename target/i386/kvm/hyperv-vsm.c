@@ -504,10 +504,9 @@ static void apic_force_enable_spiv(CPUState *cs)
     APICCommonState *apic_state = APIC_COMMON(X86_CPU(cs)->apic_state);
     APICCommonClass *apic_class = APIC_COMMON_GET_CLASS(apic_state);
 
+    assert(bql_locked());
     apic_state->spurious_vec = 0x1ff;
-    bql_lock();
     apic_class->reset(apic_state);
-    bql_unlock();
 }
 
 /* Load an HV_INITIAL_VP_CONTEXT (TLFS 15.5.2) into @cs */
@@ -902,15 +901,14 @@ uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param, bool fast)
         return HV_STATUS_INVALID_PARAMETER;
     }
 
+    bql_lock();
     load_vp_context(vtl_cpu, &input.vp_context, true);
+    cpu_synchronize_post_reset(vtl_cpu);
+    bql_unlock();
 
     /* VTL2+: the enabled set would have to live with the VTL0 VpVsmState */
     vpvsm->vp_status.enabled_vtl_set |= BIT(input.target_vtl);
     hv_vsm.vtl_enabled_for_vps |= BIT(input.target_vtl);
-
-    bql_lock();
-    cpu_synchronize_post_reset(vtl_cpu);
-    bql_unlock();
 
     return HV_STATUS_SUCCESS;
 }
@@ -2017,6 +2015,7 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
     uint16_t rep_cnt = (in >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
     bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
     uint8_t current_vtl = active_vtl(cs);
+    uint64_t status = HV_STATUS_SUCCESS;
     struct hv_enable_vp_vtl input;
     uint8_t start_vtl;
     VpVsmState *vpvsm;
@@ -2059,10 +2058,14 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
      * every VTL below the target, and for VTL0 itself when that is the
      * target, which is how Windows starts an application processor.
      */
+    /* run_on_cpu() on a vCPU other than this one needs the BQL */
+    bql_lock();
+
     for (i = MAX(input.target_vtl, 1) - 1; i >= 0; i--) {
         vcpu = hv_plane_vcpu(input.vp_index, i);
         if (!vcpu || cpu_is_bsp(X86_CPU(vcpu))) {
-            return HV_STATUS_INVALID_VP_STATE;
+            status = HV_STATUS_INVALID_VP_STATE;
+            goto out;
         }
         cpu_synchronize_state(vcpu);
         switch (X86_CPU(vcpu)->env.mp_state) {
@@ -2070,39 +2073,39 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
         case KVM_MP_STATE_STOPPED:
             break;
         default:
-            return HV_STATUS_INVALID_VP_STATE;
+            status = HV_STATUS_INVALID_VP_STATE;
+            goto out;
         }
     }
 
     if (!(vpvsm->vp_status.enabled_vtl_set & BIT(input.target_vtl))) {
-        return HV_STATUS_INVALID_PARAMETER;
+        status = HV_STATUS_INVALID_PARAMETER;
+        goto out;
     }
 
     vcpu = hv_plane_vcpu(input.vp_index, input.target_vtl);
     if (!vcpu) {
-        return HV_STATUS_INVALID_PARAMETER;
+        status = HV_STATUS_INVALID_PARAMETER;
+        goto out;
     }
 
-    bql_lock();
     if (hv_plane_vcpu_reset(vcpu)) {
-        bql_unlock();
-        return HV_STATUS_INVALID_VP_STATE;
+        status = HV_STATUS_INVALID_VP_STATE;
+        goto out;
     }
-    bql_unlock();
 
     /* the context describes a 64-bit VP; EFER.LMA follows from LME + PG */
     input.vp_context.efer |= MSR_EFER_LMA;
     /* a VTL0 VP keeps the APIC state of the INIT above, as after a SIPI */
     load_vp_context(vcpu, &input.vp_context, input.target_vtl > 0);
-
-    bql_lock();
     cpu_synchronize_post_reset(vcpu);
-    bql_unlock();
 
     start_vtl = highest_vtl(vpvsm->vp_status.enabled_vtl_set);
     if (hv_plane_vcpu_start(input.vp_index, start_vtl)) {
-        return HV_STATUS_INVALID_VP_STATE;
+        status = HV_STATUS_INVALID_VP_STATE;
     }
 
-    return HV_STATUS_SUCCESS;
+out:
+    bql_unlock();
+    return status;
 }
