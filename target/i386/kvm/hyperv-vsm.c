@@ -1420,18 +1420,18 @@ static int cs_mode(CPUX86State *env)
 /*
  * The instruction bytes at RIP and their decoded length. KVM's memory fault
  * exit carries no instruction length (Paolo Bonzini's memory protection
- * attributes RFC), so it is decoded here. Returns the number of bytes read
- * into @insn; 0 when RIP cannot be read, with @len 0 as well.
+ * attributes RFC), so it is decoded here. Returns the decoded length, with
+ * @insn holding exactly that many bytes (zero after); 0 when RIP cannot be
+ * read or the bytes do not decode, @insn then all zero.
  */
-static int read_faulting_insn(CPUState *cs, uint8_t *insn, int size,
-                              uint8_t *len)
+static int read_faulting_insn(CPUState *cs, uint8_t *insn, int size)
 {
     CPUX86State *env = &X86_CPU(cs)->env;
     int n;
 
-    *len = 0;
     /* RIP is a guest virtual address: walk the faulting VTL's tables */
     if (cpu_memory_rw_debug(cs, env->eip, insn, size, false)) {
+        memset(insn, 0, size);
         return 0;
     }
     n = hyperv_vsm_insn_len(insn, size, cs_mode(env));
@@ -1439,9 +1439,9 @@ static int read_faulting_insn(CPUState *cs, uint8_t *insn, int size,
         qemu_log_mask(LOG_UNIMP, "hyperv-vsm: cannot decode the instruction "
                       "at rip 0x%" PRIx64 " on VP %u\n", (uint64_t)env->eip,
                       hyperv_vp_index(cs));
-        return size;
+        n = 0;
     }
-    *len = n;
+    memset(insn + n, 0, size - n);
     return n;
 }
 
@@ -1453,7 +1453,6 @@ static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
     struct hv_x64_intercept_message_header *hdr = &icpt->msg.header;
     CPUX86State *env = &X86_CPU(cs)->env;
     struct hv_x64_segment_register seg;
-    uint8_t insn_len = 0;
 
     QEMU_BUILD_BUG_ON(sizeof(*icpt) > sizeof(msg->payload));
 
@@ -1473,17 +1472,22 @@ static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
     hdr->rflags = env->eflags;
 
     /*
-     * On an execute fault RIP and GPA both point at the fetch target, so
-     * the instruction bytes cannot be read; Hyper-V leaves them empty too.
+     * The length is always reported; the bytes only for a data access. On
+     * an execute fault they are the fetch target itself and Hyper-V leaves
+     * them empty. The length reported for a fetch intercept is that of the
+     * instruction at RIP (the fetch target); what Hyper-V reports there is
+     * unverified (no trace yet), the kvm-unit-tests suite was adjusted to
+     * this value.
      */
+    hdr->instruction_length =
+        read_faulting_insn(cs, icpt->msg.instruction_bytes,
+                           sizeof(icpt->msg.instruction_bytes));
+    icpt->msg.instruction_byte_count = hdr->instruction_length;
     if (hdr->intercept_access_type == HV_X64_INTERCEPT_ACCESS_TYPE_EXECUTE) {
         icpt->msg.instruction_byte_count = 0;
-    } else {
-        icpt->msg.instruction_byte_count =
-            read_faulting_insn(cs, icpt->msg.instruction_bytes,
-                               sizeof(icpt->msg.instruction_bytes), &insn_len);
+        memset(icpt->msg.instruction_bytes, 0,
+               sizeof(icpt->msg.instruction_bytes));
     }
-    hdr->instruction_length = insn_len;
 
     icpt->msg.memory_access_info.gva_valid = 0;
     icpt->msg.guest_virtual_address = 0;
@@ -1509,7 +1513,8 @@ static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
     icpt->r15 = env->regs[15];
 
     trace_hyperv_vsm_memory_intercept(hdr->vp_index, hdr->rip, gpa,
-                                      hdr->intercept_access_type, insn_len);
+                                      hdr->intercept_access_type,
+                                      hdr->instruction_length);
 }
 
 static void intercept_cb(void *data, int status)
