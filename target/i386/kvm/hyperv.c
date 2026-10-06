@@ -18,7 +18,8 @@
 #include "hw/hyperv/hyperv.h"
 #include "hyperv-proto.h"
 #include "kvm_i386.h"
-#include "hw/hyperv/vsm-kvm-abi-stub.h"
+#include "hyperv-vsm.h"
+#include "trace.h"
 
 int hyperv_x86_synic_add(X86CPU *cpu)
 {
@@ -60,12 +61,6 @@ static void async_synic_update(CPUState *cs, run_on_cpu_data data)
     bql_lock();
     hyperv_x86_synic_update(X86_CPU(cs));
     bql_unlock();
-}
-
-int hyperv_x86_vsm_init(X86CPU *cpu)
-{
-    hyperv_vp_vsm_add(CPU(cpu));
-    return 0;
 }
 
 static void kvm_hv_inject_ud(CPUState *c)
@@ -118,47 +113,48 @@ int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
         int ret;
 
         switch (code) {
-        case HV_SEND_IPI:
+        case HVCALL_SEND_IPI:
+        case HVCALL_SEND_IPI_EX:
             exit->u.hcall.result = hyperv_hcall_send_ipi(CPU(cpu), code, exit);
             break;
-        case HV_MODIFY_VTL_PROTECTION_MASK:
-            exit->u.hcall.result = hyperv_hcall_vtl_protection_mask(CPU(cpu), exit);
+        case HVCALL_MODIFY_VTL_PROTECTION_MASK:
+            exit->u.hcall.result =
+                hyperv_hcall_vtl_protection_mask(CPU(cpu), exit);
             break;
-        case HV_ENABLE_PARTITION_VTL:
-            exit->u.hcall.result = hyperv_hcall_vtl_enable_partition_vtl(CPU(cpu),
-                in_param, out_param, fast);
+        case HVCALL_ENABLE_PARTITION_VTL:
+            exit->u.hcall.result =
+                hyperv_hcall_vtl_enable_partition_vtl(CPU(cpu), in_param,
+                                                      out_param, fast);
             break;
-        case HV_ENABLE_VP_VTL:
+        case HVCALL_ENABLE_VP_VTL:
             exit->u.hcall.result =
                 hyperv_hcall_vtl_enable_vp_vtl(CPU(cpu), in_param, fast);
             break;
-        case HV_VTL_CALL:
+        case HVCALL_VTL_CALL:
+        case HVCALL_VTL_RETURN:
+            /* no result: the switch hands RAX/RCX over through vtl_control */
             exit->u.hcall.result = HV_STATUS_SUCCESS;
-            ret = hyperv_hcall_vtl_call(CPU(cpu));
-            if (ret < 0)
+            ret = code == HVCALL_VTL_CALL ? hyperv_hcall_vtl_call(CPU(cpu)) :
+                                            hyperv_hcall_vtl_return(CPU(cpu));
+            trace_hyperv_vsm_hcall_result(hyperv_vp_index(CPU(cpu)), code, ret);
+            if (ret < 0) {
+                /* not a VTL that may call or return: #UD, keep running */
                 kvm_hv_inject_ud(CPU(cpu));
+                return 0;
+            }
             return ret;
-        case HV_VTL_RETURN:
-            exit->u.hcall.result = HV_STATUS_SUCCESS;
-            ret = hyperv_hcall_vtl_return(CPU(cpu));
-            if (ret < 0)
-                kvm_hv_inject_ud(CPU(cpu));
-            return ret;
-        case HV_SEND_IPI_EX:
-            exit->u.hcall.result = hyperv_hcall_send_ipi(CPU(cpu), code, exit);
-            break;
         case HVCALL_GET_VP_REGISTERS:
-          exit->u.hcall.result =
-              hyperv_hcall_get_set_vp_register(CPU(cpu), exit, false);
-          break;
+            exit->u.hcall.result =
+                hyperv_hcall_get_set_vp_register(CPU(cpu), exit, false);
+            break;
         case HVCALL_SET_VP_REGISTERS:
-          exit->u.hcall.result =
-              hyperv_hcall_get_set_vp_register(CPU(cpu), exit, true);
-          break;
-        case HV_TRANSLATE_VIRTUAL_ADDRESS:
-          exit->u.hcall.result =
-              hyperv_hcall_translate_virtual_address(CPU(cpu), exit);
-          break;
+            exit->u.hcall.result =
+                hyperv_hcall_get_set_vp_register(CPU(cpu), exit, true);
+            break;
+        case HVCALL_TRANSLATE_VIRTUAL_ADDRESS:
+            exit->u.hcall.result =
+                hyperv_hcall_translate_virtual_address(CPU(cpu), exit);
+            break;
         case HV_POST_MESSAGE:
             exit->u.hcall.result = hyperv_hcall_post_message(in_param, fast);
             break;
@@ -177,17 +173,19 @@ int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
             exit->u.hcall.result =
                 hyperv_hcall_reset_dbg_session(out_param);
             break;
-        case HV_START_VIRTUAL_PROCESSOR:
+        case HVCALL_START_VIRTUAL_PROCESSOR:
             exit->u.hcall.result =
-                kvm_hv_start_virtual_processor(CPU(cpu), exit);
+                hyperv_hcall_start_virtual_processor(CPU(cpu), exit);
             break;
-        case HV_GET_VP_INDEX_FROM_APIC_ID:
+        case HVCALL_GET_VP_INDEX_FROM_APIC_ID:
             exit->u.hcall.result =
                 hyperv_hcall_get_vp_index_from_apic_id(CPU(cpu), exit);
             break;
         default:
             exit->u.hcall.result = HV_STATUS_INVALID_HYPERCALL_CODE;
         }
+        trace_hyperv_vsm_hcall_result(hyperv_vp_index(CPU(cpu)), code,
+                                      exit->u.hcall.result);
         return 0;
     }
 

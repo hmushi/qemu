@@ -10,12 +10,9 @@
 #ifndef HW_HYPERV_HYPERV_H
 #define HW_HYPERV_HYPERV_H
 
-#include <linux/kvm.h>
-
 #include "exec/hwaddr.h"
 #include "hw/core/cpu.h"
 #include "hw/hyperv/hyperv-proto.h"
-#include "hw/hyperv/vsm-plane-api.h"
 
 typedef struct HvSintRoute HvSintRoute;
 
@@ -25,6 +22,7 @@ typedef struct HvSintRoute HvSintRoute;
  */
 typedef void (*HvSintMsgCb)(void *data, int status);
 
+/* @vtl selects the SynIC of that VTL; plane-0 callers pass 0 */
 HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint,
                                    HvSintMsgCb cb, void *cb_data);
 void hyperv_sint_route_ref(HvSintRoute *sint_route);
@@ -62,25 +60,6 @@ int hyperv_set_msg_handler(uint32_t conn_id, HvMsgHandler handler, void *data);
  */
 int hyperv_set_event_flag_handler(uint32_t conn_id, EventNotifier *notifier);
 
-int hyperv_init_vsm(CPUState *cs);
-uint64_t hyperv_hcall_vtl_protection_mask(CPUState *cs, struct kvm_hyperv_exit *exit);
-uint16_t hyperv_hcall_vtl_enable_partition_vtl(CPUState *cs, uint64_t param1,
-                                               uint64_t param2, bool fast);
-int hyperv_vcpu_event_callback(CPUState *cpu);
-int hyperv_hcall_vtl_call(CPUState *cs);
-int hyperv_hcall_vtl_return(CPUState *cs);
-uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs, struct kvm_hyperv_exit *exit,
-                                          bool set);
-uint64_t hyperv_hcall_translate_virtual_address(CPUState *cs, struct kvm_hyperv_exit *exit);
-uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param, bool fast);
-
-int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
-                        uint64_t flags, uint8_t exit_instruction_len);
-
-uint64_t hyperv_hcall_send_ipi(CPUState *cs, int code, struct kvm_hyperv_exit *exit);
-uint64_t hyperv_hcall_get_vp_index_from_apic_id(CPUState *cs, struct kvm_hyperv_exit *exit);
-uint64_t kvm_hv_start_virtual_processor(CPUState *cs, struct kvm_hyperv_exit *exit);
-
 /*
  * Process HV_POST_MESSAGE hypercall: parse the data in the guest memory as
  * specified in @param, and call the HvMsgHandler associated with the
@@ -95,17 +74,8 @@ uint16_t hyperv_hcall_signal_event(uint64_t param, bool fast);
 
 static inline uint32_t hyperv_vp_index(CPUState *cs)
 {
-    return cs->cc->get_arch_id(cs);
+    return cs->cpu_index;
 }
-
-static inline CPUState *hyperv_vsm_vcpu(uint32_t arch_id, uint32_t vtl)
-{
-    /* plane API: sibling lookup; was cpu_by_arch_id(arch_id, namespace) */
-    CPUState *cs = hv_plane_vcpu(arch_id, vtl);
-    assert(cs);
-    return cs;
-}
-void hyperv_vp_vsm_add(CPUState *cs);
 
 void hyperv_synic_add(CPUState *cs);
 void hyperv_synic_reset(CPUState *cs);

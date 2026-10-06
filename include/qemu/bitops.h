@@ -819,8 +819,4 @@ static inline uint64_t half_unshuffle64(uint64_t x)
     return x;
 }
 
-static inline int fls(unsigned int x)
-{
-	return x ? sizeof(x) * 8 - __builtin_clz(x) : 0;
-}
 #endif

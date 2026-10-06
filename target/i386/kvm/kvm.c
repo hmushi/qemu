@@ -42,7 +42,7 @@
 #include "tdx.h"
 #include "xen-emu.h"
 #include "hyperv.h"
-#include "hw/hyperv/vsm-kvm-abi-stub.h"
+#include "hyperv-vsm.h"
 #include "hyperv-proto.h"
 
 #include "gdbstub/enums.h"
@@ -1135,7 +1135,7 @@ static struct {
         .desc = "XMM fast hypercall output (hv-xmm-output)",
         .flags = {
             {.func = HV_CPUID_FEATURES, .reg = R_EDX,
-             .bits = HV_HYPERCALL_XMM_OUPUT_AVAILABLE}
+             .bits = HV_HYPERCALL_XMM_OUTPUT_AVAILABLE}
         },
         .dependencies = BIT(HYPERV_FEAT_XMM_INPUT)
     },
@@ -1811,16 +1811,11 @@ static int hyperv_init_vcpu(X86CPU *cpu)
         }
     }
 
-    if (hyperv_feat_enabled(cpu, HYPERV_FEAT_VSM)) {
-        if (!hyperv_vp_index(cs) && hyperv_init_vsm(cs)) {
-            error_report("kvm: Failed to enable VSM MSR filtering");
-            return -1;
-        }
-
-        if (hyperv_x86_vsm_init(cpu)) {
-            error_report("kvm: Failed to init VSM state on cpu %d", hyperv_vp_index(cs));
-            return -1;
-        }
+    if (hyperv_feat_enabled(cpu, HYPERV_FEAT_VSM) &&
+        hyperv_vsm_init_vcpu(cpu)) {
+        error_report("kvm: Failed to init VSM state on cpu %u",
+                     hyperv_vp_index(cs));
+        return -1;
     }
 
     /* Skip SynIC and VP_INDEX since they are hard deps already */
@@ -4377,7 +4372,7 @@ static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
          * Hyper-V partition-wide MSRs: to avoid clearing them on cpu hot-add,
          * only sync them to KVM on the first cpu on every VTL.
          */
-        if (hyperv_vsm_vcpu(hyperv_vp_index(current_cpu), 0) == first_cpu) {
+        if (hv_plane_vcpu(hyperv_vp_index(current_cpu), 0) == first_cpu) {
             if (has_msr_hv_hypercall) {
                 kvm_msr_entry_add(cpu, HV_X64_MSR_GUEST_OS_ID,
                                   env->msr_hv_guest_os_id);
@@ -6627,15 +6622,14 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         ret = kvm_hv_handle_exit(cpu, &run->hyperv);
         break;
     case KVM_EXIT_MEMORY_FAULT:
-        /*
-         * Not reached on current master: accel/kvm/kvm-all.c consumes
-         * KVM_EXIT_MEMORY_FAULT for guest_memfd (kvm_convert_memory). The RWX
-         * VTL fault dispatch needs a hook there before the private/shared
-         * conversion. Design decision for the planes re-targeting.
-         */
-        ret = kvm_hv_handle_fault(cs, run->memory_fault.gpa, run->memory_fault.size,
+        /* RWX fault on a VTL-protected page (kvm-all.c keeps PRIVATE) */
+        ret = kvm_hv_handle_fault(cs, run->memory_fault.gpa,
+                                  run->memory_fault.size,
                                   run->memory_fault.flags,
-                                  hv_memory_fault_insn_len(run));
+                                  kvm_run_memory_fault_insn_len(run));
+        break;
+    case KVM_EXIT_PLANE_EVENT:
+        ret = hv_plane_vtl_event(cs, run);
         break;
     case KVM_EXIT_IOAPIC_EOI:
         ioapic_eoi_broadcast(run->eoi.vector);
@@ -6684,8 +6678,8 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
             ret = tdx_handle_report_fatal_error(cpu, run);
             break;
         case KVM_SYSTEM_EVENT_WAKEUP:
-            /* needs kernel ABI: wakeup exit for a vCPU in KVM_MP_STATE_HV_INACTIVE_VTL */
-            ret = hyperv_vcpu_event_callback(cs);
+            /* a vCPU parked in KVM_MP_STATE_HV_INACTIVE_VTL has an event */
+            ret = hv_plane_vtl_event(cs, run);
             break;
         default:
             ret = -1;

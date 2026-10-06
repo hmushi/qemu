@@ -17,3 +17,37 @@ kvm_xen_set_vcpu_callback(int cpu, int vector) "callback vcpu %d vector %d"
 
 # tdx.c
 tdx_handle_reset(void) ""
+
+# hyperv.c
+hyperv_vsm_hcall_result(uint32_t vp_index, uint16_t code, uint64_t result) "VP %u hcall 0x%x result 0x%" PRIx64
+
+# hyperv-vsm.c
+hyperv_vsm_setup_hypercall_page(uint32_t vp_index, int vtl, bool enable, uint64_t gpa) "VP %u VTL%d enable %d gpa 0x%" PRIx64
+hyperv_vsm_setup_vp_assist_page(uint32_t vp_index, int vtl, bool enable, uint64_t gpa) "VP %u VTL%d enable %d gpa 0x%" PRIx64
+hyperv_vsm_msr_eoi_fixup(uint32_t vp_index, uint64_t val) "VP %u EOI 0x%" PRIx64
+hyperv_vsm_vp_context(uint32_t vp_index, int vtl, uint64_t rip, uint64_t rsp, uint64_t cr3, uint64_t efer) "VP %u VTL%d rip 0x%" PRIx64 " rsp 0x%" PRIx64 " cr3 0x%" PRIx64 " efer 0x%" PRIx64
+hyperv_vsm_vtl_switch_state(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"
+hyperv_vsm_hcall_enable_partition_vtl(uint64_t partition_id, uint8_t target_vtl, uint8_t flags) "partition 0x%" PRIx64 " target VTL%u flags 0x%x"
+hyperv_vsm_hcall_enable_vp_vtl(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl) "partition 0x%" PRIx64 " VP %u target VTL%u"
+hyperv_vsm_hcall_vtl_call(uint32_t vp_index, int vtl) "VP %u from VTL%d"
+hyperv_vsm_hcall_vtl_return(uint32_t vp_index, int vtl) "VP %u from VTL%d"
+hyperv_vsm_hcall_get_set_vp_registers(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl, int active_vtl, uint16_t count, bool set) "partition 0x%" PRIx64 " VP %u target VTL%u from VTL%d count %u set %d"
+hyperv_vsm_vp_register(bool set, uint32_t name, uint64_t low, uint64_t high) "set %d name 0x%x value 0x%" PRIx64 ":0x%" PRIx64
+hyperv_vsm_hcall_vtl_protection_mask(uint64_t partition_id, uint32_t map_flags, uint8_t target_vtl, uint16_t count) "partition 0x%" PRIx64 " map flags 0x%x target VTL%u count %u"
+hyperv_vsm_set_memory_attrs(uint8_t vtl, uint64_t addr, uint64_t size, uint64_t attrs) "VTL%u [0x%" PRIx64 " +0x%" PRIx64 ") attrs 0x%" PRIx64
+hyperv_vsm_handle_fault(uint32_t vp_index, int vtl, uint64_t gpa, uint64_t size, uint8_t insn_len, uint64_t flags, uint64_t prot) "VP %u VTL%d gpa 0x%" PRIx64 " size 0x%" PRIx64 " insn len %u flags 0x%" PRIx64 " prot 0x%" PRIx64
+hyperv_vsm_memory_intercept(uint32_t vp_index, uint64_t rip, uint64_t gpa, uint8_t access, uint8_t insn_len) "VP %u rip 0x%" PRIx64 " gpa 0x%" PRIx64 " access %u insn len %u"
+hyperv_vsm_hcall_translate_virtual_address(uint64_t partition_id, uint32_t vp_index, uint8_t vtl, uint64_t control_flags, uint64_t gva_page, uint64_t gpa_page, bool overlay, uint32_t result) "partition 0x%" PRIx64 " VP %u VTL%u flags 0x%" PRIx64 " gva page 0x%" PRIx64 " gpa page 0x%" PRIx64 " overlay %d result %u"
+hyperv_vsm_hcall_send_ipi(uint32_t vp_index, int code, uint32_t vector, int from_vtl, int to_vtl, bool all_cpus, uint64_t valid_bank_mask, uint64_t bank0) "VP %u hcall 0x%x vector %u VTL%d -> VTL%d all %d bank mask 0x%" PRIx64 " bank0 0x%" PRIx64
+hyperv_vsm_send_ipi_target(uint32_t vp_index, int vtl, uint32_t vector) "VP %u VTL%d vector %u"
+hyperv_vsm_hcall_get_vp_index_from_apic_id(uint64_t partition_id, uint8_t vtl, uint64_t apic_id, uint64_t vp_index) "partition 0x%" PRIx64 " VTL%u apic id 0x%" PRIx64 " VP %" PRIu64
+hyperv_vsm_hcall_start_virtual_processor(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl, uint8_t active_vtl) "partition 0x%" PRIx64 " VP %u target VTL%u from VTL%u"
+
+# hyperv-vsm-plane.c
+hyperv_vsm_plane_stub(const char *op, int vtl) "%s VTL%d not implemented"
+hyperv_vsm_plane_run_vtl(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"
+hyperv_vsm_plane_vtl_entry(uint32_t vp_index, unsigned int state) "VP %u event state 0x%x"
+hyperv_vsm_plane_vtl_upcall(uint32_t vp_index, unsigned int state, bool handled) "VP %u event state 0x%x handled %d"
+hyperv_vsm_plane_vtl_poll(uint32_t vp_index) "VP %u parked"
+hyperv_vsm_plane_vtl_downcall(uint32_t vp_index) "VP %u"
+hyperv_vsm_plane_vcpu_event(uint32_t vp_index, int vtl) "VP %u VTL%d woken"

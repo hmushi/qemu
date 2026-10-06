@@ -63,7 +63,7 @@
 #define HV_GUEST_CRASH_MSR_AVAILABLE            (1u << 10)
 #define HV_FEATURE_DEBUG_MSRS_AVAILABLE         (1u << 11)
 #define HV_EXT_GVA_RANGES_FLUSH_AVAILABLE       (1u << 14)
-#define HV_HYPERCALL_XMM_OUPUT_AVAILABLE        (1u << 15)
+#define HV_HYPERCALL_XMM_OUTPUT_AVAILABLE       (1u << 15)
 #define HV_STIMER_DIRECT_MODE_AVAILABLE         (1u << 19)
 
 /*
@@ -193,8 +193,6 @@
 
 #define HV_STIMER_COUNT                       4
 
-#define HV_VTL_COUNT                          2
-
 /*
  * Synthetic debugger control definitions
  */
@@ -206,146 +204,5 @@
 #define HV_SYNDBG_STATUS_RECV_SUCCESS       (1u << 2)
 #define HV_SYNDBG_STATUS_RESET              (1u << 3)
 #define HV_SYNDBG_STATUS_SET_SIZE(st, sz)   (st | (sz << 16))
-
-struct kvm_hv_vcpu_per_vtl_state {
-	uint64_t rip;
-	uint64_t rsp;
-	uint64_t rflags;
-	uint64_t efer;
-	uint64_t cr0;
-	uint64_t cr3;
-	uint64_t cr4;
-    uint64_t dr7;
-	uint64_t msr_cr_pat;
-	uint64_t msr_kernel_gsbase;
-    uint64_t msr_gsbase;
-    uint64_t msr_fsbase;
-	uint64_t msr_tsc_aux;
-	uint64_t msr_sysenter_cs;
-	uint64_t msr_sysenter_esp;
-	uint64_t msr_sysenter_eip;
-	uint64_t msr_star;
-	uint64_t msr_lstar;
-	uint64_t msr_cstar;
-	uint64_t msr_sfmask;
-    uint64_t msr_hv_synic_control;
-    uint64_t msr_hv_synic_evt_page;
-    uint64_t msr_hv_synic_msg_page;
-    uint64_t msr_hv_synic_sint[HV_SINT_COUNT];
-    uint64_t msr_hv_stimer_config[HV_STIMER_COUNT];
-    uint64_t msr_hv_stimer_count[HV_STIMER_COUNT];
-    uint64_t msr_hv_guest_os_id;
-    uint64_t msr_hv_hypercall;
-    uint64_t msr_hv_tsc;
-    uint64_t msr_hv_vp_assist;
-
-    uint64_t apic_base;
-
-	struct hv_x64_segment_register cs;
-	struct hv_x64_segment_register ds;
-	struct hv_x64_segment_register es;
-	struct hv_x64_segment_register fs;
-	struct hv_x64_segment_register gs;
-	struct hv_x64_segment_register ss;
-	struct hv_x64_segment_register tr;
-	struct hv_x64_segment_register ldtr;
-
-	struct hv_x64_table_register idtr;
-	struct hv_x64_table_register gdtr;
-
-    int32_t exception_nr;
-    int32_t interrupt_injected;
-    uint8_t soft_interrupt;
-    uint8_t exception_pending;
-    uint8_t exception_injected;
-    uint8_t has_error_code;
-    int error_code;
-    uint8_t exception_has_payload;
-    uint64_t exception_payload;
-    uint8_t triple_fault_pending;
-    uint32_t ins_len;
-    uint32_t sipi_vector;
-    uint8_t nmi_injected;
-    uint8_t nmi_pending;
-
-    uint8_t hflags;
-    uint8_t hflags2;
-};
-
-struct hv_init_vp_context {
-	uint64_t rip;
-	uint64_t rsp;
-	uint64_t rflags;
-
-	struct hv_x64_segment_register cs;
-	struct hv_x64_segment_register ds;
-	struct hv_x64_segment_register es;
-	struct hv_x64_segment_register fs;
-	struct hv_x64_segment_register gs;
-	struct hv_x64_segment_register ss;
-	struct hv_x64_segment_register tr;
-	struct hv_x64_segment_register ldtr;
-
-	struct hv_x64_table_register idtr;
-	struct hv_x64_table_register gdtr;
-
-	uint64_t efer;
-	uint64_t cr0;
-	uint64_t cr3;
-	uint64_t cr4;
-	uint64_t msr_cr_pat;
-} __attribute__ ((__packed__));
-
-struct hv_enable_vp_vtl {
-	uint64_t partition_id;
-	uint32_t vp_index;
-	uint8_t target_vtl;
-	uint8_t	mbz0;
-	uint16_t mbz1;
-	struct hv_init_vp_context vp_context;
-} __attribute__ ((__packed__));
-
-union hv_enable_partition_vtl_flags {
-	uint8_t as_u8;
-	struct {
-		uint8_t enable_mbec:1;
-		uint8_t reserved:7;
-	} __attribute__ ((__packed__));
-};
-
-union hv_enable_partition_vtl {
-    uint64_t as_u64[2];
-    struct {
-        uint64_t target_partition_id;
-        uint8_t target_vtl;
-        union hv_enable_partition_vtl_flags flags;
-        uint8_t reserved[6];
-    } __attribute__((__packed__));
-};
-
-union hv_register_vsm_partition_status {
-	uint64_t as_u64;
-	struct {
-		uint64_t enabled_vtl_set:16;
-		uint64_t maximum_vtl:4;
-		uint64_t mbec_enabled_vtl_set:16;
-		uint64_t reserved:28;
-	} __attribute__ ((__packed__));
-};
-
-#define HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_SHIFT	12
-#define HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_MASK	\
-		(~((1ull << HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_SHIFT) - 1))
-
-
-enum hv_x64_pending_event_type {
-	HV_X64_PENDING_EVENT_EXCEPTION = 0,
-	HV_X64_PENDING_EVENT_MEMORY_INTERCEPT = 1,
-	HV_X64_PENDING_EVENT_NESTED_MEMORY_INTERCEPT = 2,
-	HV_X64_PENDING_EVENT_VIRTUALIZATION_FAULT = 3,
-	HV_X64_PENDING_EVENT_HYPERCALL_OUTPUT = 4,
-	HV_X64_PENDING_EXT_INT = 5,
-	HV_X64_PENDING_EVENT_SHADOW_IPT = 6
-};
 
 #endif

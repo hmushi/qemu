@@ -1,0 +1,1938 @@
+/*
+ * QEMU KVM Hyper-V Virtual Secure Mode (VSM) support
+ *
+ * Hypercall handlers, per-VP VTL state and the GPA intercept builder for
+ * TLFS chapter 15. Everything that touches KVM goes through the plane API
+ * (include/hw/hyperv/vsm-plane-api.h).
+ *
+ * Based on the VSM series by Nicolas Saenz Julienne.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+#include "qemu/error-report.h"
+#include "qemu/log.h"
+#include "qemu/main-loop.h"
+#include "qapi/error.h"
+#include "exec/target_page.h"
+#include "system/address-spaces.h"
+#include "system/cpus.h"
+#include "system/hw_accel.h"
+#include "system/memory.h"
+#include "hw/core/boards.h"
+#include "hw/core/cpu.h"
+#include "hw/i386/apic_internal.h"
+#include "hw/i386/apic-msidef.h"
+#include "hw/pci/msi.h"
+#include "hw/hyperv/hyperv.h"
+#include "cpu.h"
+#include "kvm_i386.h"
+#include "hyperv-vsm.h"
+#include "trace.h"
+
+/* Partition-wide VSM state */
+static struct {
+    GHashTable *prots[HV_NUM_VTLS];
+    /* bit N set: VTL N is enabled on at least one VP */
+    uint16_t vtl_enabled_for_vps;
+    union hv_register_vsm_code_page_offsets code_page_offsets;
+    union hv_register_vsm_partition_status partition_status;
+    union hv_register_vsm_capabilities capabilities;
+    union hv_register_vsm_partition_config partition_config[HV_NUM_VTLS];
+} hv_vsm = {
+    .vtl_enabled_for_vps = BIT(0),
+    .partition_status = {
+        .enabled_vtl_set = BIT(0),
+        .maximum_vtl = HV_NUM_VTLS - 1,
+    },
+    .capabilities = { .dr6_shared = 0 },
+};
+
+/* Per-VP, per-VTL state (child "vp-vsm" of the CPUState of that VTL) */
+struct VpVsmState {
+    DeviceState parent_obj;
+
+    CPUState *cs;
+    union hv_register_vsm_vp_status vp_status;
+    union hv_register_vsm_vp_secure_vtl_config vtl_config[HV_NUM_VTLS];
+    uint64_t msr_hv_vp_assist;
+    void *vp_assist;
+    uint64_t msr_hv_hypercall;
+    void *hypercall_page;
+    HvSintRoute *intercept_route;
+    struct hyperv_message intercept_msg;
+};
+
+#define TYPE_VP_VSM "hyperv-vp-vsm"
+OBJECT_DECLARE_SIMPLE_TYPE(VpVsmState, VP_VSM)
+
+static VpVsmState *get_vp_vsm(CPUState *cs)
+{
+    return VP_VSM(object_resolve_path_component(OBJECT(cs), "vp-vsm"));
+}
+
+static int active_vtl(CPUState *cs)
+{
+    return hv_plane_active_vtl(cs);
+}
+
+static CPUState *sibling(CPUState *cs, int vtl)
+{
+    return hv_plane_vcpu(hyperv_vp_index(cs), vtl);
+}
+
+static MemTxResult vsm_physmem_write(CPUState *cs, hwaddr addr,
+                                     const void *buf, hwaddr len)
+{
+    return address_space_write(cs->as, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+}
+
+static MemTxResult vsm_physmem_read(CPUState *cs, hwaddr addr,
+                                    void *buf, hwaddr len)
+{
+    return address_space_read(cs->as, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+}
+
+/* Hypercall page: VMCALL/VMMCALL stub plus the VTL call/return entry stubs */
+static void setup_hypercall_page(CPUState *cs, uint64_t data)
+{
+    hwaddr gpa = data & HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_MASK;
+    hwaddr len = 1 << HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_SHIFT;
+    bool enable = !!(data & HV_X64_MSR_HYPERCALL_ENABLE);
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+    uint32_t ebx = 0, ecx = 0, edx = 0;
+    char vendor[CPUID_VENDOR_SZ + 1];
+    uint8_t insn[0x30] = {};
+    int i = 0;
+
+    trace_hyperv_vsm_setup_hypercall_page(hyperv_vp_index(cs), active_vtl(cs),
+                                          enable, gpa);
+    if (!vpvsm) {
+        return;
+    }
+
+    vpvsm->msr_hv_hypercall = data;
+
+    if (vpvsm->hypercall_page) {
+        memset(vpvsm->hypercall_page, 0, len);
+        address_space_unmap(cs->as, vpvsm->hypercall_page, len, true, len);
+        vpvsm->hypercall_page = NULL;
+    }
+
+    if (!enable) {
+        return;
+    }
+
+    vpvsm->hypercall_page = address_space_map(cs->as, gpa, &len, true,
+                                              MEMTXATTRS_UNSPECIFIED);
+    if (!vpvsm->hypercall_page) {
+        error_report("hyperv-vsm: cannot map hypercall page at 0x%" HWADDR_PRIx,
+                     gpa);
+        return;
+    }
+
+    /* Intel VMCALL or AMD VMMCALL, then ret */
+    host_cpuid(0, 0, NULL, &ebx, &ecx, &edx);
+    x86_cpu_vendor_words2str(vendor, ebx, edx, ecx);
+    insn[i++] = 0x0f;
+    insn[i++] = 0x01;
+    insn[i++] = !strcmp(vendor, "GenuineIntel") ? 0xc1 : 0xd9;
+    insn[i++] = 0xc3;
+
+    /* 64-bit only; 32-bit guests need their own stubs (TLFS 15.5.7) */
+    i = 22;
+    /* VTL call: mov %rcx,%rax; mov $0x11,%ecx; jmp 0 */
+    hv_vsm.code_page_offsets.vtl_call_offset = i;
+    insn[i++] = 0x48;
+    insn[i++] = 0x89;
+    insn[i++] = 0xc8;
+    insn[i++] = 0xb9;
+    insn[i++] = HVCALL_VTL_CALL;
+    insn[i++] = 0x00;
+    insn[i++] = 0x00;
+    insn[i++] = 0x00;
+    insn[i++] = 0xeb;
+    insn[i++] = 0xe0;
+    /* VTL return: mov %rcx,%rax; mov $0x12,%ecx; jmp 0 */
+    hv_vsm.code_page_offsets.vtl_return_offset = i;
+    insn[i++] = 0x48;
+    insn[i++] = 0x89;
+    insn[i++] = 0xc8;
+    insn[i++] = 0xb9;
+    insn[i++] = HVCALL_VTL_RETURN;
+    insn[i++] = 0x00;
+    insn[i++] = 0x00;
+    insn[i++] = 0x00;
+    insn[i++] = 0xeb;
+    insn[i++] = 0xd6;
+
+    memcpy(vpvsm->hypercall_page, insn, i);
+}
+
+static bool hypercall_page_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
+{
+    if (msr != HV_X64_MSR_HYPERCALL) {
+        return false;
+    }
+
+    setup_hypercall_page(CPU(cpu), val);
+    return true;
+}
+
+/*
+ * The VTL1 secure kernel leaves reserved high bits set in HV_X64_MSR_EOI;
+ * clear them before KVM sees the write. VTL0 writes pass through unchanged.
+ */
+static bool msr_eoi_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
+{
+    CPUState *cs = CPU(cpu);
+    int ret;
+
+    if (msr != HV_X64_MSR_EOI) {
+        return false;
+    }
+
+    if (active_vtl(cs) == 1) {
+        trace_hyperv_vsm_msr_eoi_fixup(hyperv_vp_index(cs), val);
+        val &= 0xffffffff;
+    }
+
+    ret = kvm_put_one_msr(cpu, HV_X64_MSR_EOI, val);
+    if (ret < 0) {
+        error_report("hyperv-vsm: HV_X64_MSR_EOI write failed: %d", ret);
+        return false;
+    }
+
+    return true;
+}
+
+static void setup_vp_assist(CPUState *cs, uint64_t data)
+{
+    hwaddr gpa = data & HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_MASK;
+    hwaddr len = 1 << HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_SHIFT;
+    bool enable = !!(data & HV_X64_MSR_VP_ASSIST_PAGE_ENABLE);
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    trace_hyperv_vsm_setup_vp_assist_page(hyperv_vp_index(cs), active_vtl(cs),
+                                          enable, gpa);
+    if (!vpvsm) {
+        return;
+    }
+
+    vpvsm->msr_hv_vp_assist = data;
+
+    if (vpvsm->vp_assist) {
+        address_space_unmap(cs->as, vpvsm->vp_assist, len, true, len);
+        vpvsm->vp_assist = NULL;
+    }
+
+    if (!enable) {
+        return;
+    }
+
+    vpvsm->vp_assist = address_space_map(cs->as, gpa, &len, true,
+                                         MEMTXATTRS_UNSPECIFIED);
+    if (!vpvsm->vp_assist) {
+        error_report("hyperv-vsm: cannot map VP assist page at 0x%" HWADDR_PRIx,
+                     gpa);
+        return;
+    }
+
+    memset(vpvsm->vp_assist, 0, sizeof(struct hv_vp_assist_page));
+}
+
+static bool vp_assist_page_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
+{
+    if (msr != HV_X64_MSR_APIC_ASSIST_PAGE) {
+        return false;
+    }
+
+    setup_vp_assist(CPU(cpu), val);
+    kvm_put_hv_vp_assist(cpu, val);
+    return true;
+}
+
+static void vp_vsm_realize(DeviceState *dev, Error **errp)
+{
+    VpVsmState *vpvsm = VP_VSM(dev);
+
+    vpvsm->vp_status.enabled_vtl_set = BIT(0);
+    vpvsm->vp_status.active_vtl = active_vtl(vpvsm->cs);
+}
+
+static void vp_vsm_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = vp_vsm_realize;
+    dc->user_creatable = false;
+}
+
+static const TypeInfo vp_vsm_type_info = {
+    .name = TYPE_VP_VSM,
+    .parent = TYPE_DEVICE,
+    .instance_size = sizeof(VpVsmState),
+    .class_init = vp_vsm_class_init,
+};
+
+static void vp_vsm_register_types(void)
+{
+    type_register_static(&vp_vsm_type_info);
+}
+
+type_init(vp_vsm_register_types)
+
+/*
+ * MSR filters are VM-wide (KVM_X86_SET_MSR_FILTER): install the VP assist
+ * and hypercall page filters once, from VP0 of VTL0, and the EOI fixup once
+ * the first VTL1 vCPU exists. The filter then also exits for VTL0 EOIs,
+ * which msr_eoi_wrmsr() passes through; a per-plane filter would avoid that
+ * cost (P2 open point).
+ */
+int hyperv_vsm_init_vcpu(X86CPU *cpu)
+{
+    CPUState *cs = CPU(cpu);
+    KVMState *s = hv_plane_kvm_state(cs);
+    VpVsmState *vpvsm;
+    Object *obj;
+    int vtl = active_vtl(cs);
+
+    if (hyperv_vp_index(cs) == 0 && vtl == 0) {
+        if (kvm_filter_msr(s, HV_X64_MSR_APIC_ASSIST_PAGE, NULL,
+                           vp_assist_page_wrmsr) < 0 ||
+            kvm_filter_msr(s, HV_X64_MSR_HYPERCALL, NULL,
+                           hypercall_page_wrmsr) < 0) {
+            error_report("hyperv-vsm: cannot install VSM MSR filters");
+            return -1;
+        }
+    }
+
+    if (hyperv_vp_index(cs) == 0 && vtl == 1) {
+        if (kvm_filter_msr(s, HV_X64_MSR_EOI, NULL, msr_eoi_wrmsr) < 0) {
+            error_report("hyperv-vsm: cannot install HV_X64_MSR_EOI filter");
+            return -1;
+        }
+    }
+
+    obj = object_new(TYPE_VP_VSM);
+    vpvsm = VP_VSM(obj);
+    vpvsm->cs = cs;
+    object_property_add_child(OBJECT(cs), "vp-vsm", obj);
+    object_unref(obj);
+    qdev_realize(DEVICE(obj), NULL, &error_abort);
+
+    return 0;
+}
+
+static void set_seg(SegmentCache *lhs,
+                    const struct hv_x64_segment_register *rhs)
+{
+    lhs->selector = rhs->selector;
+    lhs->base = rhs->base;
+    lhs->limit = rhs->limit;
+    lhs->flags = (rhs->segment_type << DESC_TYPE_SHIFT) |
+                 (rhs->present * DESC_P_MASK) |
+                 (rhs->descriptor_privilege_level << DESC_DPL_SHIFT) |
+                 (rhs->_default << DESC_B_SHIFT) |
+                 (rhs->non_system_segment * DESC_S_MASK) |
+                 (rhs->_long << DESC_L_SHIFT) |
+                 (rhs->granularity * DESC_G_MASK) |
+                 (rhs->available * DESC_AVL_MASK);
+}
+
+static void get_seg(const SegmentCache *lhs,
+                    struct hv_x64_segment_register *rhs)
+{
+    unsigned flags = lhs->flags;
+
+    rhs->selector = lhs->selector;
+    rhs->base = lhs->base;
+    rhs->limit = lhs->limit;
+    rhs->segment_type = (flags >> DESC_TYPE_SHIFT) & 15;
+    rhs->non_system_segment = (flags & DESC_S_MASK) != 0;
+    rhs->descriptor_privilege_level = (flags >> DESC_DPL_SHIFT) & 3;
+    rhs->present = (flags & DESC_P_MASK) != 0;
+    rhs->reserved = 0;
+    rhs->available = (flags & DESC_AVL_MASK) != 0;
+    rhs->_long = (flags >> DESC_L_SHIFT) & 1;
+    rhs->_default = (flags >> DESC_B_SHIFT) & 1;
+    rhs->granularity = (flags & DESC_G_MASK) != 0;
+}
+
+/*
+ * Windows Server 2019 expects a VTL1+ APIC to be software-enabled without
+ * ever writing SPIV; enable it on its behalf.
+ */
+static void apic_force_enable_spiv(CPUState *cs)
+{
+    APICCommonState *apic_state = APIC_COMMON(X86_CPU(cs)->apic_state);
+    APICCommonClass *apic_class = APIC_COMMON_GET_CLASS(apic_state);
+
+    apic_state->spurious_vec = 0x1ff;
+    bql_lock();
+    apic_class->reset(apic_state);
+    bql_unlock();
+}
+
+/* Load an HV_INITIAL_VP_CONTEXT (TLFS 15.5.2) into @cs */
+static void load_vp_context(CPUState *cs, const struct hv_init_vp_context *c,
+                            bool enable_spiv)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+
+    trace_hyperv_vsm_vp_context(hyperv_vp_index(cs), active_vtl(cs), c->rip,
+                                c->rsp, c->cr3, c->efer);
+
+    env->regs[R_ESP] = c->rsp;
+    env->eip = c->rip;
+    env->eflags = c->rflags;
+
+    set_seg(&env->segs[R_CS], &c->cs);
+    set_seg(&env->segs[R_DS], &c->ds);
+    set_seg(&env->segs[R_ES], &c->es);
+    set_seg(&env->segs[R_FS], &c->fs);
+    set_seg(&env->segs[R_GS], &c->gs);
+    set_seg(&env->segs[R_SS], &c->ss);
+    set_seg(&env->tr, &c->tr);
+    set_seg(&env->ldt, &c->ldtr);
+
+    env->idt.limit = c->idtr.limit;
+    env->idt.base = c->idtr.base;
+    env->gdt.limit = c->gdtr.limit;
+    env->gdt.base = c->gdtr.base;
+
+    env->efer = c->efer;
+    env->cr[0] = c->cr0;
+    env->cr[3] = c->cr3;
+    env->cr[4] = c->cr4;
+    env->pat = c->msr_cr_pat;
+
+    env->mp_state = KVM_MP_STATE_RUNNABLE;
+
+    /* FS/GS base are per-VTL MSRs without their own context fields */
+    env->gsbase = c->gs.base;
+    env->fsbase = c->fs.base;
+
+    if (enable_spiv) {
+        apic_force_enable_spiv(cs);
+    }
+}
+
+static bool vp_assist_enabled(CPUState *cs)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    return vpvsm && vpvsm->vp_assist;
+}
+
+static void write_vtl_control(CPUState *cs, const struct hv_vp_vtl_control *ctl)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    memcpy(vpvsm->vp_assist + offsetof(struct hv_vp_assist_page, vtl_control),
+           ctl, sizeof(*ctl));
+}
+
+static void read_vtl_control(CPUState *cs, struct hv_vp_vtl_control *ctl)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    memcpy(ctl,
+           vpvsm->vp_assist + offsetof(struct hv_vp_assist_page, vtl_control),
+           sizeof(*ctl));
+}
+
+void hv_plane_export_shared_state(CPUState *cs, HvVtlSharedState *st)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+
+    memcpy(st->regs, env->regs, sizeof(st->regs));
+    memcpy(st->dr, env->dr, sizeof(st->dr));
+    st->cr2 = env->cr[2];
+    st->xcr0 = env->xcr0;
+    memcpy(st->mtrr_fixed, env->mtrr_fixed, sizeof(st->mtrr_fixed));
+    st->mtrr_deftype = env->mtrr_deftype;
+    memcpy(st->mtrr_var, env->mtrr_var, sizeof(st->mtrr_var));
+    st->mcg_cap = env->mcg_cap;
+    st->mcg_status = env->mcg_status;
+    st->msr_hv_tsc = env->msr_hv_tsc;
+    st->msr_hv_runtime = env->msr_hv_runtime;
+
+    st->fpstt = env->fpstt;
+    st->fpus = env->fpus;
+    st->fpuc = env->fpuc;
+    memcpy(st->fptags, env->fptags, sizeof(st->fptags));
+    memcpy(st->fpregs, env->fpregs, sizeof(st->fpregs));
+    st->fpop = env->fpop;
+    st->fpcs = env->fpcs;
+    st->fpds = env->fpds;
+    st->fpip = env->fpip;
+    st->fpdp = env->fpdp;
+    st->mxcsr = env->mxcsr;
+    memcpy(st->xmm_regs, env->xmm_regs, sizeof(st->xmm_regs));
+    st->xstate_bv = env->xstate_bv;
+}
+
+void hv_plane_import_shared_state(CPUState *cs, const HvVtlSharedState *st)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+    target_ulong rsp = env->regs[R_ESP];
+    uint64_t val;
+
+    memcpy(env->regs, st->regs, sizeof(env->regs));
+    env->regs[R_ESP] = rsp;
+    memcpy(env->dr, st->dr, sizeof(st->dr));
+    env->cr[2] = st->cr2;
+    env->xcr0 = st->xcr0;
+    memcpy(env->mtrr_fixed, st->mtrr_fixed, sizeof(env->mtrr_fixed));
+    env->mtrr_deftype = st->mtrr_deftype;
+    memcpy(env->mtrr_var, st->mtrr_var, sizeof(env->mtrr_var));
+    env->mcg_cap = st->mcg_cap;
+    env->mcg_status = st->mcg_status;
+    env->msr_hv_tsc = st->msr_hv_tsc;
+    env->msr_hv_runtime = st->msr_hv_runtime;
+
+    env->fpstt = st->fpstt;
+    env->fpus = st->fpus;
+    env->fpuc = st->fpuc;
+    memcpy(env->fptags, st->fptags, sizeof(env->fptags));
+    memcpy(env->fpregs, st->fpregs, sizeof(env->fpregs));
+    env->fpop = st->fpop;
+    env->fpcs = st->fpcs;
+    env->fpds = st->fpds;
+    env->fpip = st->fpip;
+    env->fpdp = st->fpdp;
+    env->mxcsr = st->mxcsr;
+    memcpy(env->xmm_regs, st->xmm_regs, sizeof(env->xmm_regs));
+    env->xstate_bv = st->xstate_bv;
+
+    /* the BSP bit belongs to VP0 in every VTL */
+    if (!hyperv_vp_index(cs)) {
+        val = cpu_get_apic_base(X86_CPU(cs)->apic_state);
+        val |= MSR_IA32_APICBASE_BSP;
+        cpu_set_apic_base(X86_CPU(cs)->apic_state, val);
+    }
+}
+
+void hyperv_vsm_vtl_switch_state(CPUState *prev, CPUState *next,
+                                 HvPlaneSwitchReason reason)
+{
+    CPUX86State *prev_env = &X86_CPU(prev)->env;
+    CPUX86State *next_env = &X86_CPU(next)->env;
+    struct hv_vp_vtl_control ctl;
+    HvVtlSharedState shared;
+
+    trace_hyperv_vsm_vtl_switch_state(hyperv_vp_index(prev), active_vtl(prev),
+                                      active_vtl(next), reason);
+
+    hv_plane_export_shared_state(prev, &shared);
+    hv_plane_import_shared_state(next, &shared);
+
+    if (reason == HV_PLANE_SWITCH_VTL_RETURN) {
+        /* TLFS 15.5.8: VtlReturn hands RAX/RCX back through vtl_control */
+        if (vp_assist_enabled(prev)) {
+            read_vtl_control(prev, &ctl);
+            next_env->regs[R_EAX] = ctl.vtl_ret_x64rax;
+            next_env->regs[R_ECX] = ctl.vtl_ret_x64rcx;
+        }
+        return;
+    }
+
+    if (vp_assist_enabled(next)) {
+        ctl = (struct hv_vp_vtl_control) {
+            .vtl_entry_reason = reason == HV_PLANE_SWITCH_VTL_CALL ?
+                                HV_VTL_ENTRY_VTL_CALL : HV_VTL_ENTRY_INTERRUPT,
+            .vtl_ret_x64rax = prev_env->regs[R_EAX],
+            .vtl_ret_x64rcx = prev_env->regs[R_ECX],
+        };
+        write_vtl_control(next, &ctl);
+    }
+}
+
+static int highest_vtl(uint16_t set)
+{
+    return 31 - clz32(set);
+}
+
+uint16_t hyperv_hcall_vtl_enable_partition_vtl(CPUState *cs, uint64_t param1,
+                                               uint64_t param2, bool fast)
+{
+    union hv_enable_partition_vtl input;
+
+    /* TLFS 15.5.1: fast call only */
+    if (!fast) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    input.as_uint64[0] = param1;
+    input.as_uint64[1] = param2;
+
+    trace_hyperv_vsm_hcall_enable_partition_vtl(input.target_partition_id,
+                                                input.target_vtl,
+                                                input.flags.as_uint8);
+
+    if (input.target_partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    /* MBEC is not advertised */
+    if (input.flags.enable_mbec) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    if (input.target_vtl > hv_vsm.partition_status.maximum_vtl) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    if (hv_vsm.partition_status.enabled_vtl_set & BIT(input.target_vtl)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    /*
+     * The caller runs at a VTL at least as high as the new one, or at the
+     * highest VTL enabled so far when the new one is higher than that.
+     */
+    if (active_vtl(cs) < input.target_vtl &&
+        active_vtl(cs) !=
+        highest_vtl(hv_vsm.partition_status.enabled_vtl_set)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    if (hv_plane_create(input.target_vtl)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    hv_vsm.partition_status.enabled_vtl_set |= BIT(input.target_vtl);
+    return HV_STATUS_SUCCESS;
+}
+
+uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param, bool fast)
+{
+    CPUState *target_vcpu, *vtl_cpu;
+    struct hv_enable_vp_vtl input;
+    VpVsmState *vpvsm;
+
+    /* TLFS 15.5.2: neither fast nor rep */
+    if (fast) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    if (vsm_physmem_read(cs, param, &input, sizeof(input)) != MEMTX_OK) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    trace_hyperv_vsm_hcall_enable_vp_vtl(input.partition_id, input.vp_index,
+                                         input.target_vtl);
+
+    if (input.partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    if (input.vp_index == HV_VP_INDEX_SELF) {
+        input.vp_index = hyperv_vp_index(cs);
+    }
+
+    target_vcpu = hv_plane_vcpu(input.vp_index, 0);
+    if (!target_vcpu) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+    vpvsm = get_vp_vsm(target_vcpu);
+
+    if (input.target_vtl > hv_vsm.partition_status.maximum_vtl) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    if (!(hv_vsm.partition_status.enabled_vtl_set & BIT(input.target_vtl))) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    if (vpvsm->vp_status.enabled_vtl_set & BIT(input.target_vtl)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    /*
+     * The caller runs at a VTL at least as high as the new one, or at the
+     * highest VTL any VP has enabled.
+     */
+    if (active_vtl(cs) < input.target_vtl &&
+        active_vtl(cs) != highest_vtl(hv_vsm.vtl_enabled_for_vps)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    vtl_cpu = hv_plane_vcpu_create(input.vp_index, input.target_vtl);
+    if (!vtl_cpu) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    load_vp_context(vtl_cpu, &input.vp_context, true);
+
+    /* VTL2+: the enabled set would have to live with the VTL0 VpVsmState */
+    vpvsm->vp_status.enabled_vtl_set |= BIT(input.target_vtl);
+    hv_vsm.vtl_enabled_for_vps |= BIT(input.target_vtl);
+
+    bql_lock();
+    cpu_synchronize_post_reset(vtl_cpu);
+    bql_unlock();
+
+    return HV_STATUS_SUCCESS;
+}
+
+/* TLB lock on the plane-0 vCPU (TLFS 15.5.4 TlbFlushInhibit) */
+static void set_tlb_flush_inhibit(CPUState *vtl0, bool inhibit)
+{
+    int ret;
+
+    if (!vtl0) {
+        return;
+    }
+    ret = hv_plane_set_tlb_flush_inhibit(vtl0, inhibit);
+    if (ret) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: TLB flush inhibit %d failed: "
+                      "%d\n", inhibit, ret);
+    }
+}
+
+int hyperv_hcall_vtl_call(CPUState *cs)
+{
+    int vtl = active_vtl(cs);
+
+    trace_hyperv_vsm_hcall_vtl_call(hyperv_vp_index(cs), vtl);
+
+    /* VTL0 <-> VTL1 only */
+    if (vtl != 0 || !sibling(cs, 1)) {
+        return -EINVAL;
+    }
+
+    return hv_plane_run_vtl(cs, 1, HV_PLANE_SWITCH_VTL_CALL);
+}
+
+int hyperv_hcall_vtl_return(CPUState *cs)
+{
+    int vtl = active_vtl(cs);
+    CPUState *vtl0;
+
+    trace_hyperv_vsm_hcall_vtl_return(hyperv_vp_index(cs), vtl);
+
+    if (vtl != 1) {
+        return -EINVAL;
+    }
+
+    vtl0 = sibling(cs, 0);
+    if (!vtl0) {
+        return -EINVAL;
+    }
+    set_tlb_flush_inhibit(vtl0, false);
+
+    return hv_plane_run_vtl(cs, 0, HV_PLANE_SWITCH_VTL_RETURN);
+}
+
+static bool get_vp_secure_vtl_config(CPUState *cs, uint32_t reg,
+                                     struct hv_u128 *val)
+{
+    int reg_vtl = reg - HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0;
+    int target_vtl = active_vtl(cs);
+
+    /* the register describes a VTL below the one it is read from */
+    if (target_vtl == 0 || reg_vtl >= target_vtl) {
+        return false;
+    }
+
+    val->low_part = get_vp_vsm(cs)->vtl_config[reg_vtl].as_uint64;
+    return true;
+}
+
+static bool set_vp_secure_vtl_config(CPUState *cs, uint32_t reg, uint64_t data)
+{
+    union hv_register_vsm_vp_secure_vtl_config new_val = { .as_uint64 = data };
+    int reg_vtl = reg - HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0;
+    int target_vtl = active_vtl(cs);
+
+    if (target_vtl == 0 || reg_vtl >= target_vtl) {
+        return false;
+    }
+
+    if (new_val.mbec_enabled &&
+        !(hv_vsm.capabilities.mbec_vtl_mask & BIT(reg_vtl))) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: MBEC requested for VTL%d, "
+                      "ignored\n", reg_vtl);
+    }
+
+    get_vp_vsm(cs)->vtl_config[reg_vtl] = new_val;
+    return true;
+}
+
+static void set_vsm_partition_config(uint8_t vtl, uint64_t data)
+{
+    union hv_register_vsm_partition_config new_val = { .as_uint64 = data };
+    union hv_register_vsm_partition_config *cur = &hv_vsm.partition_config[vtl];
+
+    /* enable_vtl_protection and the default mask are write-once */
+    if (cur->enable_vtl_protection) {
+        new_val.enable_vtl_protection = cur->enable_vtl_protection;
+        new_val.default_vtl_protection_mask = cur->default_vtl_protection_mask;
+    }
+
+    if (new_val.intercept_vp_startup || new_val.deny_lower_vtl_startup) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VP startup intercepts not "
+                      "advertised, ignored\n");
+    }
+
+    *cur = new_val;
+}
+
+static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
+                                CPUState *target_vcpu)
+{
+    VpVsmState *vpvsm = get_vp_vsm(target_vcpu);
+    X86CPU *cpu = X86_CPU(target_vcpu);
+    CPUX86State *env = &cpu->env;
+    struct hv_x64_segment_register seg;
+    struct hv_x64_table_register tr;
+
+    val->low_part = val->high_part = 0;
+
+    switch (name) {
+    case HV_X64_REGISTER_RSP:
+        val->low_part = env->regs[R_ESP];
+        break;
+    case HV_X64_REGISTER_RIP:
+        val->low_part = env->eip;
+        break;
+    case HV_X64_REGISTER_RFLAGS:
+        val->low_part = env->eflags;
+        break;
+    case HV_X64_REGISTER_CR0:
+        val->low_part = env->cr[0];
+        break;
+    case HV_X64_REGISTER_CR3:
+        val->low_part = env->cr[3];
+        break;
+    case HV_X64_REGISTER_CR4:
+        val->low_part = env->cr[4];
+        break;
+    case HV_X64_REGISTER_CR8:
+        val->low_part = cpu_get_apic_tpr(cpu->apic_state);
+        break;
+    case HV_X64_REGISTER_DR7:
+        val->low_part = env->dr[7];
+        break;
+    case HV_X64_REGISTER_LDTR:
+        get_seg(&env->ldt, &seg);
+        memcpy(val, &seg, sizeof(seg));
+        break;
+    case HV_X64_REGISTER_TR:
+        get_seg(&env->tr, &seg);
+        memcpy(val, &seg, sizeof(seg));
+        break;
+    case HV_X64_REGISTER_IDTR:
+        tr = (struct hv_x64_table_register) {
+            .limit = env->idt.limit, .base = env->idt.base,
+        };
+        memcpy(val, &tr, sizeof(tr));
+        break;
+    case HV_X64_REGISTER_GDTR:
+        tr = (struct hv_x64_table_register) {
+            .limit = env->gdt.limit, .base = env->gdt.base,
+        };
+        memcpy(val, &tr, sizeof(tr));
+        break;
+    case HV_X64_REGISTER_EFER:
+        val->low_part = env->efer;
+        break;
+    case HV_X64_REGISTER_SYSENTER_CS:
+        val->low_part = env->sysenter_cs;
+        break;
+    case HV_X64_REGISTER_SYSENTER_EIP:
+        val->low_part = env->sysenter_eip;
+        break;
+    case HV_X64_REGISTER_SYSENTER_ESP:
+        val->low_part = env->sysenter_esp;
+        break;
+    case HV_X64_REGISTER_STAR:
+        val->low_part = env->star;
+        break;
+#ifdef TARGET_X86_64
+    case HV_X64_REGISTER_LSTAR:
+        val->low_part = env->lstar;
+        break;
+    case HV_X64_REGISTER_CSTAR:
+        val->low_part = env->cstar;
+        break;
+    case HV_X64_REGISTER_SFMASK:
+        val->low_part = env->fmask;
+        break;
+#endif
+    case HV_X64_REGISTER_TSC_AUX:
+        val->low_part = env->tsc_aux;
+        break;
+    case HV_X64_REGISTER_APIC_BASE:
+        val->low_part = cpu_get_apic_base(cpu->apic_state);
+        break;
+    case HV_REGISTER_VSM_CAPABILITIES:
+        val->low_part = hv_vsm.capabilities.as_uint64;
+        break;
+    case HV_REGISTER_VSM_PARTITION_STATUS:
+        val->low_part = hv_vsm.partition_status.as_uint64;
+        break;
+    case HV_REGISTER_VSM_VP_STATUS:
+        val->low_part = vpvsm->vp_status.as_uint64;
+        break;
+    case HV_REGISTER_VSM_PARTITION_CONFIG:
+        /* partition-wide per VTL; relies on 64-bit store atomicity */
+        val->low_part =
+            hv_vsm.partition_config[active_vtl(target_vcpu)].as_uint64;
+        break;
+    case HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0 ...
+         HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL14:
+        if (!get_vp_secure_vtl_config(target_vcpu, name, val)) {
+            return HV_STATUS_INVALID_PARAMETER;
+        }
+        break;
+    case HV_REGISTER_VP_ASSIST_PAGE:
+        val->low_part = vpvsm->msr_hv_vp_assist;
+        break;
+    case HV_REGISTER_VSM_CODE_PAGE_OFFSETS:
+        val->low_part = hv_vsm.code_page_offsets.as_uint64;
+        break;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: GetVpRegisters: unknown "
+                      "register 0x%x\n", name);
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    trace_hyperv_vsm_vp_register(false, name, val->low_part, val->high_part);
+    return HV_STATUS_SUCCESS;
+}
+
+static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
+                                CPUState *target_vcpu, bool *dirty)
+{
+    X86CPU *cpu = X86_CPU(target_vcpu);
+    CPUX86State *env = &cpu->env;
+    struct hv_x64_segment_register seg;
+    struct hv_x64_table_register tr;
+
+    trace_hyperv_vsm_vp_register(true, name, val->low_part, val->high_part);
+
+    switch (name) {
+    case HV_X64_REGISTER_RSP:
+        env->regs[R_ESP] = val->low_part;
+        break;
+    case HV_X64_REGISTER_RIP:
+        env->eip = val->low_part;
+        break;
+    case HV_X64_REGISTER_RFLAGS:
+        env->eflags = val->low_part;
+        break;
+    case HV_X64_REGISTER_CR0:
+        env->cr[0] = val->low_part;
+        break;
+    case HV_X64_REGISTER_CR3:
+        env->cr[3] = val->low_part;
+        break;
+    case HV_X64_REGISTER_CR4:
+        env->cr[4] = val->low_part;
+        break;
+    case HV_X64_REGISTER_CR8:
+        cpu_set_apic_tpr(cpu->apic_state, val->low_part);
+        break;
+    case HV_X64_REGISTER_DR7:
+        env->dr[7] = val->low_part;
+        break;
+    case HV_X64_REGISTER_LDTR:
+        memcpy(&seg, val, sizeof(seg));
+        set_seg(&env->ldt, &seg);
+        break;
+    case HV_X64_REGISTER_TR:
+        memcpy(&seg, val, sizeof(seg));
+        set_seg(&env->tr, &seg);
+        break;
+    case HV_X64_REGISTER_IDTR:
+        memcpy(&tr, val, sizeof(tr));
+        env->idt.base = tr.base;
+        env->idt.limit = tr.limit;
+        break;
+    case HV_X64_REGISTER_GDTR:
+        memcpy(&tr, val, sizeof(tr));
+        env->gdt.base = tr.base;
+        env->gdt.limit = tr.limit;
+        break;
+    case HV_X64_REGISTER_EFER:
+        env->efer = val->low_part;
+        break;
+    case HV_X64_REGISTER_SYSENTER_CS:
+        env->sysenter_cs = val->low_part;
+        break;
+    case HV_X64_REGISTER_SYSENTER_EIP:
+        env->sysenter_eip = val->low_part;
+        break;
+    case HV_X64_REGISTER_SYSENTER_ESP:
+        env->sysenter_esp = val->low_part;
+        break;
+    case HV_X64_REGISTER_STAR:
+        env->star = val->low_part;
+        break;
+#ifdef TARGET_X86_64
+    case HV_X64_REGISTER_LSTAR:
+        env->lstar = val->low_part;
+        break;
+    case HV_X64_REGISTER_CSTAR:
+        env->cstar = val->low_part;
+        break;
+    case HV_X64_REGISTER_SFMASK:
+        env->fmask = val->low_part;
+        break;
+#endif
+    case HV_X64_REGISTER_TSC_AUX:
+        env->tsc_aux = val->low_part;
+        break;
+    case HV_REGISTER_VSM_PARTITION_CONFIG:
+        set_vsm_partition_config(active_vtl(target_vcpu), val->low_part);
+        break;
+    case HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0 ...
+         HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL14:
+        if (!set_vp_secure_vtl_config(target_vcpu, name, val->low_part)) {
+            return HV_STATUS_INVALID_PARAMETER;
+        }
+        break;
+    case HV_REGISTER_PENDING_EVENT0: {
+        union hv_x64_pending_exception_event event = {
+            .as_uint64[0] = val->low_part,
+            .as_uint64[1] = val->high_part,
+        };
+
+        if (!event.event_pending) {
+            break;
+        }
+
+        if (event.event_type != HV_X64_PENDING_EVENT_EXCEPTION) {
+            qemu_log_mask(LOG_UNIMP, "hyperv-vsm: pending event type %d not "
+                          "supported\n", event.event_type);
+            break;
+        }
+
+        kvm_queue_exception(env, event.vector, event.deliver_error_code,
+                            event.error_code, false, 0);
+        break;
+    }
+    case HV_REGISTER_VP_ASSIST_PAGE:
+        env->msr_hv_vapic = val->low_part;
+        setup_vp_assist(target_vcpu, val->low_part);
+        break;
+    case HV_REGISTER_VSM_VINA:
+    case HV_X64_REGISTER_CR_INTERCEPT_CONTROL:
+    case HV_X64_REGISTER_CR_INTERCEPT_CR0_MASK:
+    case HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK:
+    case HV_X64_REGISTER_CR_INTERCEPT_IA32_MISC_ENABLE_MASK:
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: SetVpRegisters: register 0x%x "
+                      "accepted but not implemented\n", name);
+        return HV_STATUS_SUCCESS;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: SetVpRegisters: unknown "
+                      "register 0x%x\n", name);
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    *dirty = true;
+    return HV_STATUS_SUCCESS;
+}
+
+/* registers handled per call; bounds the stack use, not a TLFS limit */
+#define VP_REGISTER_LIST_SIZE 16u
+
+uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
+                                          struct kvm_hyperv_exit *exit,
+                                          bool set)
+{
+    uint64_t in = exit->u.hcall.input;
+    uint16_t rep_cnt = (in >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+    uint16_t rep_idx = (in >> HV_HYPERCALL_REP_START_OFFSET) & 0xfff;
+    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
+    MachineState *ms = MACHINE(qdev_get_machine());
+    struct hv_u128 vals[VP_REGISTER_LIST_SIZE];
+    uint32_t names[VP_REGISTER_LIST_SIZE];
+    struct hv_input_get_vp_registers input;
+    uint16_t xmm_index = 0;
+    CPUState *target_vcpu;
+    bool dirty = false;
+    uint16_t status = HV_STATUS_SUCCESS;
+    uint16_t nregs;
+    uint8_t vtl;
+    int i;
+
+    if (rep_idx >= rep_cnt) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+    nregs = MIN(rep_cnt - rep_idx, VP_REGISTER_LIST_SIZE);
+
+    if (fast) {
+        /* names (and values) travel in XMM registers */
+        if (!hv_exit_has_xmm(exit)) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+        input.partition_id = exit->u.hcall.params[0];
+        input.vp_index = exit->u.hcall.params[1] & 0xffffffff;
+        input.input_vtl.as_uint8 = (exit->u.hcall.params[1] >> 32) & 0xff;
+
+        /* everything is returned at once, so no continuation */
+        if (rep_idx != 0) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+
+        /* 6 XMM registers hold at most 4 names plus 4 values */
+        if (nregs > 4) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+
+        for (i = 0; i < nregs; i += 4, xmm_index += 2) {
+            names[i] = hv_exit_xmm_get(exit, xmm_index);
+            names[i + 1] = hv_exit_xmm_get(exit, xmm_index) >> 32;
+            names[i + 2] = hv_exit_xmm_get(exit, xmm_index + 1);
+            names[i + 3] = hv_exit_xmm_get(exit, xmm_index + 1) >> 32;
+        }
+
+        if (set) {
+            for (i = 0; i < nregs; i++, xmm_index += 2) {
+                vals[i].low_part = hv_exit_xmm_get(exit, xmm_index);
+                vals[i].high_part = hv_exit_xmm_get(exit, xmm_index + 1);
+            }
+        }
+    } else {
+        uint64_t ingpa = exit->u.hcall.params[0];
+
+        if (vsm_physmem_read(cs, ingpa, &input, sizeof(input)) != MEMTX_OK) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+
+        ingpa += sizeof(input) + rep_idx * sizeof(*names);
+        if (vsm_physmem_read(cs, ingpa, names,
+                             nregs * sizeof(*names)) != MEMTX_OK) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+
+        if (set) {
+            /* values start 16-byte aligned after all rep_cnt names */
+            ingpa = ROUND_UP(exit->u.hcall.params[0] + sizeof(input) +
+                             rep_cnt * sizeof(*names), 16) +
+                    rep_idx * sizeof(*vals);
+            if (vsm_physmem_read(cs, ingpa, vals,
+                                 nregs * sizeof(*vals)) != MEMTX_OK) {
+                return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            }
+        }
+    }
+
+    if (input.partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    if (input.input_vtl.use_target_vtl) {
+        vtl = input.input_vtl.target_vtl;
+        if (vtl >= HV_NUM_VTLS) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+        if (vtl > active_vtl(cs)) {
+            return HV_STATUS_ACCESS_DENIED;
+        }
+    } else {
+        vtl = active_vtl(cs);
+    }
+
+    if (input.vp_index == HV_VP_INDEX_SELF) {
+        input.vp_index = hyperv_vp_index(cs);
+    } else if (input.vp_index >= ms->smp.max_cpus) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+
+    target_vcpu = hv_plane_vcpu(input.vp_index, vtl);
+    if (!target_vcpu) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+
+    trace_hyperv_vsm_hcall_get_set_vp_registers(input.partition_id,
+                                                input.vp_index, vtl,
+                                                active_vtl(cs), nregs, set);
+
+    bql_lock();
+    cpu_synchronize_state(target_vcpu);
+    for (i = 0; i < nregs; i++) {
+        status = set ?
+                 set_vp_register(names[i], &vals[i], target_vcpu, &dirty) :
+                 get_vp_register(names[i], &vals[i], target_vcpu);
+        if (status != HV_STATUS_SUCCESS) {
+            break;
+        }
+    }
+    if (dirty) {
+        cpu_synchronize_post_reset(target_vcpu);
+    }
+    bql_unlock();
+
+    if (status != HV_STATUS_SUCCESS) {
+        return status;
+    }
+
+    if (!set) {
+        if (fast) {
+            for (i = 0; i < nregs; i++, xmm_index += 2) {
+                hv_exit_xmm_set(exit, xmm_index, vals[i].low_part);
+                hv_exit_xmm_set(exit, xmm_index + 1, vals[i].high_part);
+            }
+        } else {
+            uint64_t outgpa = exit->u.hcall.params[1] + rep_idx * sizeof(*vals);
+
+            vsm_physmem_write(cs, outgpa, vals, sizeof(*vals) * nregs);
+        }
+    }
+
+    return (uint64_t)HV_STATUS_SUCCESS |
+           ((uint64_t)nregs << HV_HYPERCALL_REP_COMP_OFFSET);
+}
+
+static bool gpa_is_overlay(CPUState *cs, uint64_t gpa)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    uint64_t hcall = vpvsm->msr_hv_hypercall &
+                     HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_MASK;
+    uint64_t assist = vpvsm->msr_hv_vp_assist &
+                      HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_MASK;
+
+    return hcall == gpa || assist == gpa;
+}
+
+static uint32_t translate_result_code(const struct kvm_translation2 *tr,
+                                      uint64_t control_flags)
+{
+    switch (tr->error_code) {
+    case KVM_TRANSLATE_FAULT_NOT_PRESENT:
+    case KVM_TRANSLATE_FAULT_INVALID_GVA:
+        return HV_TRANSLATE_GVA_PAGE_NOT_PRESENT;
+    case KVM_TRANSLATE_FAULT_PRIVILEGE_VIOLATION:
+        return HV_TRANSLATE_GVA_PRIVILEGE_VIOLATION;
+    case KVM_TRANSLATE_FAULT_RESERVED_BITS:
+        return HV_TRANSLATE_GVA_INVALIDE_PAGE_TABLE_FLAGS;
+    case KVM_TRANSLATE_FAULT_INVALID_GPA:
+        return HV_TRANSLATE_GVA_GPA_UNMAPPED;
+    default:
+        if (!tr->set_bits_succeeded &&
+            (control_flags & HV_TRANSLATE_GVA_SET_PAGE_TABLE_BITS)) {
+            return HV_TRANSLATE_GVA_GPA_NO_WRITE_ACCESS;
+        }
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: KVM_TRANSLATE2 error code %u "
+                      "not mapped\n", tr->error_code);
+        return HV_TRANSLATE_GVA_PRIVILEGE_VIOLATION;
+    }
+}
+
+uint64_t hyperv_hcall_translate_virtual_address(CPUState *cs,
+                                                struct kvm_hyperv_exit *exit)
+{
+    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
+    struct hv_output_translate_virtual_address output = {};
+    struct hv_input_translate_virtual_address input;
+    struct kvm_translation2 tr = {};
+    union hv_input_vtl in_vtl;
+    CPUState *target_vcpu;
+    uint64_t flags;
+    uint8_t target_vtl;
+    int ret;
+
+    if (fast) {
+        if (!hv_exit_has_xmm(exit)) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+        input.partition_id = exit->u.hcall.params[0];
+        input.vp_index = exit->u.hcall.params[1] & 0xffffffff;
+        input.control_flags = hv_exit_xmm_get(exit, 0);
+        input.gva_page = hv_exit_xmm_get(exit, 1);
+    } else if (vsm_physmem_read(cs, exit->u.hcall.params[0], &input,
+                                sizeof(input)) != MEMTX_OK) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    if (input.partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    in_vtl.as_uint8 = input.control_flags >> HV_TRANSLATE_GVA_INPUT_VTL_SHIFT;
+    flags = input.control_flags & HV_TRANSLATE_GVA_FLAGS_MASK;
+    if (in_vtl.use_target_vtl) {
+        target_vtl = in_vtl.target_vtl;
+        if (target_vtl > active_vtl(cs)) {
+            return HV_STATUS_INVALID_VP_STATE;
+        }
+    } else {
+        target_vtl = active_vtl(cs);
+    }
+
+    if (input.vp_index == HV_ANY_VP) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+    if (input.vp_index == HV_VP_INDEX_SELF) {
+        input.vp_index = hyperv_vp_index(cs);
+    }
+
+    target_vcpu = hv_plane_vcpu(input.vp_index, target_vtl);
+    if (!target_vcpu) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+
+    tr.linear_address = input.gva_page << HV_HYP_PAGE_SHIFT;
+    if (flags & HV_TRANSLATE_GVA_VALIDATE_WRITE) {
+        tr.access |= KVM_TRANSLATE_ACCESS_WRITE;
+    }
+    if (flags & HV_TRANSLATE_GVA_VALIDATE_EXECUTE) {
+        tr.access |= KVM_TRANSLATE_ACCESS_EXEC;
+    }
+    if (!(flags & HV_TRANSLATE_GVA_PRIVILEGE_EXEMPT) &&
+        (X86_CPU(target_vcpu)->env.hflags & HF_CPL_MASK)) {
+        tr.access |= KVM_TRANSLATE_ACCESS_USER;
+    }
+    if (flags & HV_TRANSLATE_GVA_SET_PAGE_TABLE_BITS) {
+        tr.flags = KVM_TRANSLATE_FLAGS_SET_ACCESSED |
+                   KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED;
+        if (tr.access & KVM_TRANSLATE_ACCESS_WRITE) {
+            tr.flags |= KVM_TRANSLATE_FLAGS_SET_DIRTY;
+        }
+    }
+
+    ret = hv_plane_translate(target_vcpu, &tr);
+    if (ret < 0) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: KVM_TRANSLATE2 failed: %d\n",
+                      ret);
+        tr.valid = false;
+    }
+
+    output.gpa_page = tr.physical_address >> HV_HYP_PAGE_SHIFT;
+    if (tr.valid) {
+        output.translation_result.result_code = HV_TRANSLATE_GVA_SUCCESS;
+        output.translation_result.cache_type = HV_CACHE_TYPE_WRITE_BACK;
+        output.translation_result.overlay_page =
+            gpa_is_overlay(target_vcpu, tr.physical_address);
+
+        if (flags & HV_TRANSLATE_GVA_TLB_FLUSH_INHIBIT) {
+            set_tlb_flush_inhibit(sibling(cs, 0), true);
+        }
+    } else {
+        output.translation_result.result_code =
+            translate_result_code(&tr, flags);
+    }
+
+    trace_hyperv_vsm_hcall_translate_virtual_address(input.partition_id,
+            input.vp_index, target_vtl, input.control_flags, input.gva_page,
+            output.gpa_page, output.translation_result.overlay_page,
+            output.translation_result.result_code);
+
+    if (fast) {
+        hv_exit_xmm_set(exit, 2, output.translation_result.as_uint64);
+        hv_exit_xmm_set(exit, 3, output.gpa_page);
+    } else {
+        vsm_physmem_write(cs, exit->u.hcall.params[1], &output, sizeof(output));
+    }
+
+    return HV_STATUS_SUCCESS;
+}
+
+static uint8_t intercept_access_type(uint64_t flags)
+{
+    if (flags & KVM_MEMORY_EXIT_FLAG_READ) {
+        return HV_X64_INTERCEPT_ACCESS_TYPE_READ;
+    }
+    if (flags & KVM_MEMORY_EXIT_FLAG_WRITE) {
+        return HV_X64_INTERCEPT_ACCESS_TYPE_WRITE;
+    }
+    return HV_X64_INTERCEPT_ACCESS_TYPE_EXECUTE;
+}
+
+/* TLFS 15.10.2: build the GPA intercept message for a lower-VTL fault */
+static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
+                                   uint64_t gpa, uint64_t flags,
+                                   uint8_t insn_len)
+{
+    struct hv_vsm_memory_intercept_message *icpt = (void *)msg->payload;
+    struct hv_x64_intercept_message_header *hdr = &icpt->msg.header;
+    CPUX86State *env = &X86_CPU(cs)->env;
+    struct hv_x64_segment_register seg;
+
+    QEMU_BUILD_BUG_ON(sizeof(*icpt) > sizeof(msg->payload));
+
+    msg->header.message_type = HV_MESSAGE_GPA_INTERCEPT;
+    msg->header.payload_size = sizeof(*icpt);
+
+    hdr->vp_index = hyperv_vp_index(cs);
+    hdr->instruction_length = insn_len;
+    hdr->intercept_access_type = intercept_access_type(flags);
+    get_seg(&env->segs[R_CS], &hdr->cs_segment);
+    get_seg(&env->segs[R_SS], &seg);
+    hdr->execution_state.cpl = seg.descriptor_privilege_level;
+    hdr->execution_state.cr0_pe = !!(env->cr[0] & CR0_PE_MASK);
+    hdr->execution_state.cr0_am = !!(env->cr[0] & CR0_AM_MASK);
+    hdr->execution_state.efer_lma = !!(env->efer & MSR_EFER_LMA);
+    hdr->execution_state.vtl = active_vtl(cs);
+    hdr->rip = env->eip;
+    hdr->rflags = env->eflags;
+
+    /*
+     * On an execute fault RIP and GPA both point at the fetch target, so
+     * the instruction bytes cannot be read; Hyper-V leaves them empty too.
+     */
+    if (hdr->intercept_access_type == HV_X64_INTERCEPT_ACCESS_TYPE_EXECUTE) {
+        icpt->msg.instruction_byte_count = 0;
+    } else {
+        /* RIP is a guest virtual address: walk the faulting VTL's tables */
+        icpt->msg.instruction_byte_count =
+            MIN(insn_len, sizeof(icpt->msg.instruction_bytes));
+        if (cpu_memory_rw_debug(cs, env->eip, icpt->msg.instruction_bytes,
+                                icpt->msg.instruction_byte_count, false)) {
+            icpt->msg.instruction_byte_count = 0;
+        }
+    }
+
+    icpt->msg.memory_access_info.gva_valid = 0;
+    icpt->msg.guest_virtual_address = 0;
+    icpt->msg.guest_physical_address = gpa;
+    icpt->msg.cache_type = HV_CACHE_TYPE_WRITE_BACK;
+    get_seg(&env->segs[R_DS], &icpt->ds);
+    icpt->ss = seg;
+    icpt->rax = env->regs[R_EAX];
+    icpt->rcx = env->regs[R_ECX];
+    icpt->rdx = env->regs[R_EDX];
+    icpt->rbx = env->regs[R_EBX];
+    icpt->rsp = env->regs[R_ESP];
+    icpt->rbp = env->regs[R_EBP];
+    icpt->rsi = env->regs[R_ESI];
+    icpt->rdi = env->regs[R_EDI];
+    icpt->r8 = env->regs[8];
+    icpt->r9 = env->regs[9];
+    icpt->r10 = env->regs[10];
+    icpt->r11 = env->regs[11];
+    icpt->r12 = env->regs[12];
+    icpt->r13 = env->regs[13];
+    icpt->r14 = env->regs[14];
+    icpt->r15 = env->regs[15];
+
+    trace_hyperv_vsm_memory_intercept(hdr->vp_index, hdr->rip, gpa,
+                                      hdr->intercept_access_type, insn_len);
+}
+
+static void intercept_cb(void *data, int status)
+{
+    VpVsmState *vpvsm = data;
+
+    if (!status) {
+        return;
+    }
+
+    assert(status == -EAGAIN);
+
+    /* the slot was busy; repost once the guest has acknowledged */
+    while (hyperv_post_msg(vpvsm->intercept_route, &vpvsm->intercept_msg)) {
+        sched_yield();
+    }
+}
+
+/* Post @msg on SINT0 of @cs (the higher VTL vCPU of the faulting VP) */
+static int deliver_memory_intercept(CPUState *cs,
+                                    const struct hyperv_message *msg)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    vpvsm->intercept_msg = *msg;
+
+    if (!vpvsm->intercept_route) {
+        vpvsm->intercept_route = hyperv_sint_route_new(hyperv_vp_index(cs),
+                                                       active_vtl(cs), 0,
+                                                       intercept_cb, vpvsm);
+    }
+    if (!vpvsm->intercept_route) {
+        error_report("hyperv-vsm: cannot create the intercept SINT route for "
+                     "VP %u VTL%d", hyperv_vp_index(cs), active_vtl(cs));
+        return -1;
+    }
+
+    while (hyperv_post_msg(vpvsm->intercept_route, &vpvsm->intercept_msg)) {
+        sched_yield();
+    }
+
+    return 0;
+}
+
+int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
+                        uint64_t flags, uint8_t insn_len)
+{
+    int vtl = active_vtl(cs);
+    GHashTable *prots = hv_vsm.prots[vtl];
+    uint64_t gfn = gpa >> HV_HYP_PAGE_SHIFT;
+    struct hyperv_message msg = {};
+    CPUState *next;
+    uint64_t prot;
+
+    if (!prots || !g_hash_table_contains(prots, GUINT_TO_POINTER(gfn))) {
+        qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: unexpected memory fault on "
+                      "VP %u VTL%d gpa 0x%" PRIx64 " size 0x%" PRIx64
+                      " flags 0x%" PRIx64 "\n", hyperv_vp_index(cs), vtl, gpa,
+                      size, flags);
+        return -1;
+    }
+
+    prot = GPOINTER_TO_UINT(g_hash_table_lookup(prots, GUINT_TO_POINTER(gfn)));
+    trace_hyperv_vsm_handle_fault(hyperv_vp_index(cs), vtl, gpa, size, insn_len,
+                                  flags, prot);
+
+    next = sibling(cs, vtl + 1);
+    if (!next) {
+        return -1;
+    }
+
+    cpu_synchronize_state(cs);
+    build_memory_intercept(cs, &msg, gpa, flags, insn_len);
+    if (deliver_memory_intercept(next, &msg)) {
+        return -1;
+    }
+
+    return hv_plane_run_vtl(cs, vtl + 1, HV_PLANE_SWITCH_INTERCEPT);
+}
+
+/* HV_MAP_GPA_* permissions to plane access restrictions */
+static uint64_t map_flags_to_memattrs(uint32_t flags)
+{
+    uint64_t attrs = KVM_MEMORY_ATTRIBUTE_NR | KVM_MEMORY_ATTRIBUTE_NW |
+                     KVM_MEMORY_ATTRIBUTE_NX;
+
+    if (flags & HV_MAP_GPA_READABLE) {
+        attrs &= ~KVM_MEMORY_ATTRIBUTE_NR;
+    }
+    if (flags & HV_MAP_GPA_WRITABLE) {
+        attrs &= ~KVM_MEMORY_ATTRIBUTE_NW;
+    }
+    if (flags & HV_MAP_GPA_EXECUTABLE) {
+        attrs &= ~KVM_MEMORY_ATTRIBUTE_NX;
+    }
+
+    return attrs;
+}
+
+static int set_memory_attrs_range(uint8_t vtl, uint64_t start, uint64_t end,
+                                  uint64_t attrs)
+{
+    hwaddr addr = start << HV_HYP_PAGE_SHIFT;
+    hwaddr size = (end - start) << HV_HYP_PAGE_SHIFT;
+    int ret;
+
+    trace_hyperv_vsm_set_memory_attrs(vtl, addr, size, attrs);
+    ret = hv_plane_set_memory_attrs(vtl, addr, size, attrs);
+    if (ret) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: cannot set attrs 0x%" PRIx64
+                      " on VTL%d [0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx
+                      "): %d\n", attrs, vtl, addr, addr + size, ret);
+    }
+    return ret;
+}
+
+/* Apply @flags to the sorted @gfn_list for @vtl, coalescing contiguous GFNs */
+static int set_memory_attrs(uint8_t vtl, uint32_t flags, uint16_t count,
+                            const uint64_t *gfn_list)
+{
+    uint64_t attrs = map_flags_to_memattrs(flags);
+    uint64_t start, end;
+    int i, ret;
+
+    if (!hv_vsm.prots[vtl]) {
+        hv_vsm.prots[vtl] = g_hash_table_new(g_direct_hash, g_direct_equal);
+    }
+
+    start = gfn_list[0];
+    end = start + 1;
+    for (i = 1; i < count; i++) {
+        if (gfn_list[i] == end) {
+            end++;
+            continue;
+        }
+        ret = set_memory_attrs_range(vtl, start, end, attrs);
+        if (ret) {
+            return ret;
+        }
+        start = gfn_list[i];
+        end = start + 1;
+    }
+    ret = set_memory_attrs_range(vtl, start, end, attrs);
+    if (ret) {
+        return ret;
+    }
+
+    for (i = 0; i < count; i++) {
+        g_hash_table_insert(hv_vsm.prots[vtl], GUINT_TO_POINTER(gfn_list[i]),
+                            GUINT_TO_POINTER(flags));
+    }
+
+    return 0;
+}
+
+uint64_t hyperv_hcall_vtl_protection_mask(CPUState *cs,
+                                          struct kvm_hyperv_exit *exit)
+{
+    uint64_t in = exit->u.hcall.input;
+    uint16_t rep_cnt = (in >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+    uint16_t rep_idx = (in >> HV_HYPERCALL_REP_START_OFFSET) & 0xfff;
+    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
+    union hv_modify_vtl_protection_mask input;
+    g_autofree uint64_t *gfn_list = NULL;
+    uint8_t target_vtl;
+    uint16_t count, i;
+
+    if (rep_idx >= rep_cnt) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+    count = rep_cnt - rep_idx;
+
+    if (fast) {
+        input.as_uint64[0] = exit->u.hcall.params[0];
+        input.as_uint64[1] = exit->u.hcall.params[1];
+
+        /* GFNs travel in XMM; everything is consumed at once */
+        if (!hv_exit_has_xmm(exit) || rep_idx != 0 ||
+            count > 2 * HV_HYPERCALL_MAX_XMM_REGISTERS) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+
+        gfn_list = g_new0(uint64_t, count);
+        for (i = 0; i < count; i++) {
+            gfn_list[i] = hv_exit_xmm_get(exit, i);
+        }
+    } else {
+        uint64_t ingpa = exit->u.hcall.params[0];
+
+        if (vsm_physmem_read(cs, ingpa, &input, sizeof(input)) != MEMTX_OK) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+
+        gfn_list = g_new0(uint64_t, count);
+        ingpa += sizeof(input) + rep_idx * sizeof(*gfn_list);
+        if (vsm_physmem_read(cs, ingpa, gfn_list,
+                             count * sizeof(*gfn_list)) != MEMTX_OK) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+    }
+
+    trace_hyperv_vsm_hcall_vtl_protection_mask(input.target_partition_id,
+                                               input.map_flags,
+                                               input.input_vtl.target_vtl,
+                                               count);
+
+    if (input.target_partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    /* protections apply to a lower VTL; default is the one right below */
+    if (input.input_vtl.use_target_vtl) {
+        target_vtl = input.input_vtl.target_vtl;
+        if (target_vtl >= active_vtl(cs)) {
+            return HV_STATUS_ACCESS_DENIED;
+        }
+    } else {
+        if (active_vtl(cs) == 0) {
+            return HV_STATUS_INVALID_PARAMETER;
+        }
+        target_vtl = active_vtl(cs) - 1;
+    }
+
+    if (target_vtl >= HV_NUM_VTLS) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    if (set_memory_attrs(target_vtl, input.map_flags, count, gfn_list)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    return (uint64_t)count << HV_HYPERCALL_REP_COMP_OFFSET;
+}
+
+static uint64_t get_sparse_vp_set(CPUState *cs, struct kvm_hyperv_exit *exit,
+                                  bool fast, uint16_t cnt, uint64_t *data,
+                                  int consumed_xmm_halves)
+{
+    uint64_t in_addr;
+    int i;
+
+    if (cnt > HV_MAX_SPARSE_VCPU_BANKS) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    if (fast) {
+        /* two banks per XMM register, minus the halves already used */
+        if (!hv_exit_has_xmm(exit) ||
+            cnt > 2 * HV_HYPERCALL_MAX_XMM_REGISTERS - consumed_xmm_halves) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+        for (i = 0; i < cnt; i++) {
+            data[i] = hv_exit_xmm_get(exit, i + consumed_xmm_halves);
+        }
+        return HV_STATUS_SUCCESS;
+    }
+
+    in_addr = exit->u.hcall.params[0] +
+              offsetof(struct hv_send_ipi_ex, vp_set.bank_contents);
+    if (vsm_physmem_read(cs, in_addr, data, cnt * sizeof(*data)) != MEMTX_OK) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+    return HV_STATUS_SUCCESS;
+}
+
+static bool vp_in_sparse_set(uint32_t vp_id, uint64_t valid_bank_mask,
+                             const uint64_t *sparse_banks)
+{
+    int valid_bit_nr = vp_id / HV_VCPUS_PER_SPARSE_BANK;
+    unsigned long sbank;
+
+    if (!(valid_bank_mask & BIT_ULL(valid_bit_nr))) {
+        return false;
+    }
+
+    /* the bank index is the number of valid bits below this one */
+    sbank = valid_bit_nr ?
+            ctpop64(valid_bank_mask & MAKE_64BIT_MASK(0, valid_bit_nr)) : 0;
+
+    return sparse_banks[sbank] & BIT_ULL(vp_id % HV_VCPUS_PER_SPARSE_BANK);
+}
+
+uint64_t hyperv_hcall_send_ipi(CPUState *cs, int code,
+                               struct kvm_hyperv_exit *exit)
+{
+    uint16_t var_cnt = (exit->u.hcall.input & HV_HYPERCALL_VARHEAD_MASK) >>
+                       HV_HYPERCALL_VARHEAD_OFFSET;
+    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
+    uint64_t sparse_banks[HV_MAX_SPARSE_VCPU_BANKS] = {};
+    uint64_t ingpa = exit->u.hcall.params[0];
+    struct hv_send_ipi_ex send_ipi_ex;
+    struct hv_send_ipi send_ipi;
+    union hv_input_vtl in_vtl;
+    uint64_t valid_bank_mask;
+    bool all_cpus = false;
+    CPUState *target_cs;
+    uint32_t vector;
+    uint16_t status;
+    int target_vtl;
+
+    if (code == HVCALL_SEND_IPI) {
+        if (fast) {
+            vector = (uint32_t)ingpa;
+            in_vtl.as_uint8 = (uint8_t)(ingpa >> 32);
+            sparse_banks[0] = exit->u.hcall.params[1];
+        } else {
+            if (vsm_physmem_read(cs, ingpa, &send_ipi,
+                                 sizeof(send_ipi)) != MEMTX_OK) {
+                return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            }
+            vector = send_ipi.vector;
+            in_vtl.as_uint8 = send_ipi.in_vtl.as_uint8;
+            sparse_banks[0] = send_ipi.cpu_mask;
+        }
+        valid_bank_mask = BIT_ULL(0);
+    } else {
+        if (fast) {
+            if (!hv_exit_has_xmm(exit)) {
+                return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            }
+            vector = (uint32_t)exit->u.hcall.params[0];
+            in_vtl.as_uint8 = (uint8_t)(exit->u.hcall.params[0] >> 32);
+            send_ipi_ex.vp_set.format = exit->u.hcall.params[1];
+            valid_bank_mask = hv_exit_xmm_get(exit, 0);
+        } else {
+            if (vsm_physmem_read(cs, ingpa, &send_ipi_ex,
+                                 sizeof(send_ipi_ex)) != MEMTX_OK) {
+                return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            }
+            vector = send_ipi_ex.vector;
+            in_vtl.as_uint8 = send_ipi_ex.in_vtl.as_uint8;
+            valid_bank_mask = send_ipi_ex.vp_set.valid_bank_mask;
+        }
+
+        all_cpus = send_ipi_ex.vp_set.format == HV_GENERIC_SET_ALL;
+        if (!all_cpus) {
+            status = get_sparse_vp_set(cs, exit, fast, var_cnt, sparse_banks,
+                                       1);
+            if (status != HV_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+    }
+
+    target_vtl = in_vtl.use_target_vtl ? in_vtl.target_vtl : active_vtl(cs);
+    trace_hyperv_vsm_hcall_send_ipi(hyperv_vp_index(cs), code, vector,
+                                    active_vtl(cs), target_vtl, all_cpus,
+                                    valid_bank_mask, sparse_banks[0]);
+
+    if (vector < HV_IPI_LOW_VECTOR || vector > HV_IPI_HIGH_VECTOR) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    CPU_FOREACH(target_cs) {
+        MSIMessage msg;
+
+        if (active_vtl(target_cs) != target_vtl) {
+            continue;
+        }
+        if (!all_cpus && !vp_in_sparse_set(hyperv_vp_index(target_cs),
+                                           valid_bank_mask, sparse_banks)) {
+            continue;
+        }
+
+        trace_hyperv_vsm_send_ipi_target(hyperv_vp_index(target_cs), target_vtl,
+                                         vector);
+        msg = (MSIMessage) {
+            .address = APIC_DEFAULT_ADDRESS |
+                       (target_cs->cc->get_arch_id(target_cs) <<
+                        MSI_ADDR_DEST_ID_SHIFT),
+            .data = vector,
+        };
+        kvm_irqchip_send_msi(hv_plane_kvm_state(target_cs), msg);
+    }
+
+    return HV_STATUS_SUCCESS;
+}
+
+uint64_t hyperv_hcall_get_vp_index_from_apic_id(CPUState *cs,
+                                                struct kvm_hyperv_exit *exit)
+{
+    uint64_t in = exit->u.hcall.input;
+    uint16_t rep_cnt = (in >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+    uint16_t rep_idx = (in >> HV_HYPERCALL_REP_START_OFFSET) & 0xfff;
+    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
+    struct hv_get_vp_index_from_apic_id_input input;
+    CPUState *target_vcpu;
+    uint64_t apic_id;
+    uint64_t vp_index;
+    uint16_t count;
+
+    /* one APIC id per call */
+    if (rep_idx >= rep_cnt) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+    count = 1;
+
+    if (fast) {
+        if (!hv_exit_has_xmm(exit)) {
+            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        }
+        input.partition_id = exit->u.hcall.params[0];
+        input.target_vtl = exit->u.hcall.params[1] & 0xff;
+        apic_id = hv_exit_xmm_get(exit, 0);
+    } else if (vsm_physmem_read(cs, exit->u.hcall.params[0], &input,
+                                sizeof(input)) != MEMTX_OK ||
+               vsm_physmem_read(cs, exit->u.hcall.params[0] + sizeof(input),
+                                &apic_id, sizeof(apic_id)) != MEMTX_OK) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    if (input.partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    apic_id &= 0xffffffff;
+    target_vcpu = cpu_by_arch_id(apic_id);
+    if (!target_vcpu ||
+        !hv_plane_vcpu(hyperv_vp_index(target_vcpu), input.target_vtl)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    vp_index = hyperv_vp_index(target_vcpu);
+    trace_hyperv_vsm_hcall_get_vp_index_from_apic_id(input.partition_id,
+                                                     input.target_vtl, apic_id,
+                                                     vp_index);
+
+    if (fast) {
+        hv_exit_xmm_set(exit, 2, vp_index);
+    } else {
+        vsm_physmem_write(cs, exit->u.hcall.params[1], &vp_index,
+                          sizeof(vp_index));
+    }
+
+    return ((uint64_t)count << HV_HYPERCALL_REP_COMP_OFFSET) |
+           HV_STATUS_SUCCESS;
+}
+
+uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
+                                              struct kvm_hyperv_exit *exit)
+{
+    uint64_t in = exit->u.hcall.input;
+    uint16_t rep_idx = (in >> HV_HYPERCALL_REP_START_OFFSET) & 0xfff;
+    uint16_t rep_cnt = (in >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
+    uint8_t current_vtl = active_vtl(cs);
+    struct hv_enable_vp_vtl input;
+    uint8_t start_vtl;
+    VpVsmState *vpvsm;
+    CPUState *vcpu;
+    int i;
+
+    /* TLFS 15.5.9: neither fast nor rep */
+    if (fast || rep_cnt || rep_idx) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    if (vsm_physmem_read(cs, exit->u.hcall.params[0], &input,
+                         sizeof(input)) != MEMTX_OK) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    trace_hyperv_vsm_hcall_start_virtual_processor(input.partition_id,
+                                                   input.vp_index,
+                                                   input.target_vtl,
+                                                   current_vtl);
+
+    if (input.partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    if (input.target_vtl > hv_vsm.partition_status.maximum_vtl ||
+        input.target_vtl > current_vtl) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    vcpu = hv_plane_vcpu(input.vp_index, 0);
+    if (!vcpu) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+    vpvsm = get_vp_vsm(vcpu);
+
+    /* the target VP must be stopped in every lower VTL and not be the BSP */
+    for (i = input.target_vtl - 1; i >= 0; i--) {
+        vcpu = hv_plane_vcpu(input.vp_index, i);
+        if (!vcpu || !cpu_is_stopped(vcpu) || cpu_is_bsp(X86_CPU(vcpu))) {
+            return HV_STATUS_INVALID_VP_STATE;
+        }
+    }
+
+    if (!(vpvsm->vp_status.enabled_vtl_set & BIT(input.target_vtl))) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    vcpu = hv_plane_vcpu(input.vp_index, input.target_vtl);
+    if (!vcpu) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    bql_lock();
+    if (hv_plane_vcpu_reset(vcpu)) {
+        bql_unlock();
+        return HV_STATUS_INVALID_VP_STATE;
+    }
+    bql_unlock();
+
+    /* the context describes a 64-bit VP; EFER.LMA follows from LME + PG */
+    input.vp_context.efer |= MSR_EFER_LMA;
+    load_vp_context(vcpu, &input.vp_context, true);
+
+    bql_lock();
+    cpu_synchronize_post_reset(vcpu);
+    bql_unlock();
+
+    start_vtl = highest_vtl(vpvsm->vp_status.enabled_vtl_set);
+    if (hv_plane_vcpu_start(input.vp_index, start_vtl)) {
+        return HV_STATUS_INVALID_VP_STATE;
+    }
+
+    return HV_STATUS_SUCCESS;
+}

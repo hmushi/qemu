@@ -9,6 +9,7 @@
 
 #include "qemu/osdep.h"
 #include "hyperv.h"
+#include "hyperv-vsm.h"
 
 #ifdef CONFIG_KVM
 int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
@@ -38,7 +39,28 @@ int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
         return -1;
     }
 }
+
+int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
+                        uint64_t flags, uint8_t insn_len)
+{
+    return -1;
+}
+
+int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run)
+{
+    return -1;
+}
+
+CPUState *hv_plane_vcpu(uint32_t vp_index, int vtl)
+{
+    return vtl == 0 ? qemu_get_cpu(vp_index) : NULL;
+}
 #endif
+
+int hyperv_vsm_init_vcpu(X86CPU *cpu)
+{
+    return -ENOSYS;
+}
 
 int hyperv_x86_synic_add(X86CPU *cpu)
 {
