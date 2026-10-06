@@ -50,6 +50,7 @@
 #include "qemu/guest-random.h"
 #include "system/hw_accel.h"
 #include "kvm-cpus.h"
+#include "hw/hyperv/vsm-kvm-abi-stub.h"
 #include "system/dirtylimit.h"
 #include "qemu/range.h"
 
@@ -3597,6 +3598,11 @@ int kvm_cpu_exec(CPUState *cpu)
             trace_kvm_memory_fault(run->memory_fault.gpa,
                                    run->memory_fault.size,
                                    run->memory_fault.flags);
+            if (run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_RWX) {
+                /* access restriction fault, not a private/shared mismatch */
+                ret = kvm_arch_handle_exit(cpu, run);
+                break;
+            }
             if (run->memory_fault.flags & ~KVM_MEMORY_EXIT_FLAG_PRIVATE) {
                 error_report("KVM_EXIT_MEMORY_FAULT: Unknown flag 0x%" PRIx64,
                              (uint64_t)run->memory_fault.flags);

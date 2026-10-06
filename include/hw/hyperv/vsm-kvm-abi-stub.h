@@ -100,6 +100,9 @@ static inline struct kvm_run_planes *kvm_run_planes(struct kvm_run *run)
 #ifndef KVM_CAP_HYPERV_HCALL_FAULT_EXIT
 #define KVM_CAP_HYPERV_HCALL_FAULT_EXIT     250 /* RFC value; placeholder */
 #endif
+#define KVM_MEMORY_EXIT_FLAG_RWX            (KVM_MEMORY_EXIT_FLAG_READ | \
+                                             KVM_MEMORY_EXIT_FLAG_WRITE | \
+                                             KVM_MEMORY_EXIT_FLAG_EXEC)
 
 /*
  * P3: instruction length on KVM_EXIT_MEMORY_FAULT, appended after size
