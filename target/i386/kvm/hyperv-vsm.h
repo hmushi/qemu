@@ -11,6 +11,7 @@
 #include "system/kvm.h"
 #include "hw/hyperv/hyperv-vsm-proto.h"
 #include "hw/hyperv/vsm-plane-api.h"
+#include "hw/hyperv/hyperv-vsm-insn.h"
 
 /* per-vCPU VSM state (VP assist page, hypercall page, VTL config) */
 int hyperv_vsm_init_vcpu(X86CPU *cpu);
@@ -37,9 +38,6 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
 /* RWX memory fault on a lower VTL: build and post the GPA intercept */
 int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
                         uint64_t flags);
-
-/* hyperv-vsm-insn.c: length of the x86 instruction at @buf, 0 if unknown */
-int hyperv_vsm_insn_len(const uint8_t *buf, int len, int mode);
 
 /* TLFS 15.3.1 VTL-shared VP state; see hv_plane_export_shared_state() */
 struct HvVtlSharedState {

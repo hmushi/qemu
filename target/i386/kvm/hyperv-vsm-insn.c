@@ -12,7 +12,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hyperv-vsm.h"
+#include "hw/hyperv/hyperv-vsm-insn.h"
 
 typedef struct {
     const uint8_t *buf;

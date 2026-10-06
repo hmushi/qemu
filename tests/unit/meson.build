@@ -24,6 +24,7 @@ tests = {
   'test-resv-mem': [],
   # all code tested by test-x86-topo is inside topology.h
   'test-x86-topo': [],
+  'test-hyperv-vsm-insn': [files('../../target/i386/kvm/hyperv-vsm-insn.c')],
   'test-cutils': [],
   'test-div128': [],
   'test-shift128': [],
