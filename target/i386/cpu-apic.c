@@ -106,4 +106,23 @@ void hmp_info_local_apic(MonitorHMP *hmp, const QDict *qdict)
     }
     x86_cpu_dump_local_apic_state(cs, CPU_DUMP_FPU);
 }
+
+/*
+ * The VTLs of a VP are separate CPUStates that share a cpu_index and an
+ * APIC ID, so neither "info registers" nor "info lapic" can name one. Dump
+ * them all, the plane vCPUs included.
+ */
+void hmp_info_vtl(MonitorHMP *hmp, const QDict *qdict)
+{
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        monitor_hmp_printf(hmp, "\nVP %d VTL %d: halted %d mp_state %d\n",
+                           cs->cpu_index, cs->kvm_plane, cs->halted,
+                           X86_CPU(cs)->env.mp_state);
+        cpu_synchronize_state(cs);
+        cpu_dump_state(cs, NULL, 0);
+        x86_cpu_dump_local_apic_state(cs, 0);
+    }
+}
 #endif

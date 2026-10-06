@@ -205,6 +205,7 @@ void hmp_info_mem(MonitorHMP *hmp, const QDict *qdict);
 void hmp_info_tlb(MonitorHMP *hmp, const QDict *qdict);
 void hmp_mce(MonitorHMP *hmp, const QDict *qdict);
 void hmp_info_local_apic(MonitorHMP *hmp, const QDict *qdict);
+void hmp_info_vtl(MonitorHMP *hmp, const QDict *qdict);
 void hmp_info_sev(MonitorHMP *hmp, const QDict *qdict);
 void hmp_info_sgx(MonitorHMP *hmp, const QDict *qdict);
 void hmp_info_via(MonitorHMP *hmp, const QDict *qdict);

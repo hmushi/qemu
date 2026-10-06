@@ -121,6 +121,22 @@ SRST
 ERST
 
     {
+        .name       = "vtl",
+        .args_type  = "",
+        .params     = "",
+        .help       = "show the registers and local APIC of every virtual "
+                      "trust level of every virtual processor",
+        .cmd        = hmp_info_vtl,
+        .arch_bitmask = QEMU_ARCH_I386,
+    },
+
+SRST
+  ``info vtl``
+    Show the state of every VTL of every VP, including the plane vCPUs that
+    ``info registers`` and ``info lapic`` cannot name.
+ERST
+
+    {
         .name       = "cpus",
         .args_type  = "",
         .params     = "",
