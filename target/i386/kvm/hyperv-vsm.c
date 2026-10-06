@@ -2014,11 +2014,15 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
     vpvsm = get_vp_vsm(vcpu);
 
     /*
-     * The VP must not be the BSP and must not be started: its KVM MP state
-     * (fetched with the registers) is UNINITIALIZED, INIT_RECEIVED (the
-     * wait-for-SIPI state QEMU leaves an application processor in) or
-     * STOPPED. Checked for every VTL below the target, and for VTL0 itself
-     * when that is the target, which is how Windows starts a processor.
+     * The hypercall carries a processor context, so a higher VTL uses it to
+     * seize a lower VTL's processor rather than to bring an unstarted one
+     * up: the secure kernel takes an application processor away from the
+     * firmware that parked it and hands it the context of the operating
+     * system. Any idle state is therefore expected, including HALTED, which
+     * is where firmware leaves a processor it has run. Only the BSP, a
+     * running processor and a start already in flight are refused. Checked
+     * for every VTL below the target, and for VTL0 itself when that is the
+     * target, which is how Windows starts a processor.
      */
     /* run_on_cpu() on a vCPU other than this one needs the BQL */
     bql_lock();
@@ -2033,6 +2037,7 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
         switch (X86_CPU(vcpu)->env.mp_state) {
         case KVM_MP_STATE_UNINITIALIZED:
         case KVM_MP_STATE_INIT_RECEIVED:
+        case KVM_MP_STATE_HALTED:
         case KVM_MP_STATE_STOPPED:
             break;
         default:
