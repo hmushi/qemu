@@ -21,6 +21,8 @@
 #include "system/reset.h"
 #include "system/hw_accel.h"
 #include "system/memory.h"
+#include "system/ramblock.h"
+#include "system/ramlist.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/i386/apic_internal.h"
@@ -62,7 +64,7 @@ struct VpVsmState {
     HvSintRoute *intercept_route;
     struct hyperv_message intercept_msg;
     /* HvRegisterVsmVina: stored for read-back; no VINA is delivered */
-    uint64_t vina;
+    union hv_register_vsm_vina vina;
 };
 
 #define TYPE_VP_VSM "hyperv-vp-vsm"
@@ -293,6 +295,24 @@ type_init(vp_vsm_register_types)
 static int set_memory_attrs_range(uint8_t vtl, uint64_t start, uint64_t end,
                                   uint64_t attrs);
 
+/* guest RAM only: ROMs (firmware, option ROMs) and ROM devices stay */
+static int zero_ram_block(RAMBlock *rb, void *opaque)
+{
+    void *host = qemu_ram_get_host_addr(rb);
+
+    if (!host || !rb->mr || !memory_region_is_ram(rb->mr) ||
+        memory_region_is_rom(rb->mr) || memory_region_is_romd(rb->mr)) {
+        return 0;
+    }
+    memset(host, 0, qemu_ram_get_used_length(rb));
+    return 0;
+}
+
+static void hyperv_vsm_zero_memory(void)
+{
+    qemu_ram_foreach_block(zero_ram_block, NULL);
+}
+
 /*
  * System reset with VSM enabled: the guest starts over in VTL0 with no VTL
  * enabled. The KVM planes and plane vCPUs persist (the kernel cannot
@@ -319,7 +339,7 @@ static void hyperv_vsm_reset(void *opaque)
             vpvsm->intercept_route = NULL;
         }
         memset(vpvsm->vtl_config, 0, sizeof(vpvsm->vtl_config));
-        vpvsm->vina = 0;
+        vpvsm->vina.as_uint64 = 0;
         vpvsm->vp_status.as_uint64 = 0;
         vpvsm->vp_status.enabled_vtl_set = BIT(0);
         vpvsm->vp_status.active_vtl = active_vtl(cs);
@@ -340,6 +360,18 @@ static void hyperv_vsm_reset(void *opaque)
         }
         g_hash_table_destroy(hv_vsm.prots[vtl]);
         hv_vsm.prots[vtl] = NULL;
+    }
+
+    /*
+     * TLFS 15.6.3 zero_memory_on_reset: the higher VTL asks for guest memory
+     * to be scrubbed on a partition reset so its secrets do not survive into
+     * the next VTL0. Scrub all RAM when any enabled VTL set it.
+     */
+    for (vtl = 1; vtl < HV_NUM_VTLS; vtl++) {
+        if (hv_vsm.partition_config[vtl].zero_memory_on_reset) {
+            hyperv_vsm_zero_memory();
+            break;
+        }
     }
 
     hv_vsm.vtl_enabled_for_vps = BIT(0);
@@ -844,9 +876,13 @@ static void set_vsm_partition_config(uint8_t vtl, uint64_t data)
         new_val.default_vtl_protection_mask = cur->default_vtl_protection_mask;
     }
 
-    if (new_val.intercept_vp_startup || new_val.deny_lower_vtl_startup) {
-        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VP startup intercepts not "
-                      "advertised, ignored\n");
+    if (new_val.deny_lower_vtl_startup || new_val.intercept_acceptance ||
+        new_val.intercept_enable_vtl_protection ||
+        new_val.intercept_vp_startup || new_val.intercept_cpuid_unimplemented ||
+        new_val.intercept_unrecoverable_exception || new_val.intercept_page) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VTL%d partition config 0x%"
+                      PRIx64 ": startup deny and intercept bits are not "
+                      "advertised, stored only\n", vtl, data);
     }
 
     /*
@@ -983,7 +1019,7 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
         break;
     case HV_REGISTER_VSM_VINA:
         /* VINA is not delivered; the register reads back as written */
-        val->low_part = vpvsm->vina;
+        val->low_part = vpvsm->vina.as_uint64;
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: GetVpRegisters: unknown "
@@ -1110,11 +1146,18 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         env->msr_hv_vapic = val->low_part;
         setup_vp_assist(target_vcpu, val->low_part);
         break;
-    case HV_REGISTER_VSM_VINA:
-        get_vp_vsm(target_vcpu)->vina = val->low_part;
-        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VINA 0x%" PRIx64 " stored, not "
-                      "delivered\n", val->low_part);
+    case HV_REGISTER_VSM_VINA: {
+        union hv_register_vsm_vina *vina = &get_vp_vsm(target_vcpu)->vina;
+
+        vina->as_uint64 = val->low_part;
+        if (vina->enabled) {
+            qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VINA vector 0x%x enabled on "
+                          "VP %u VTL%d, not delivered\n",
+                          (unsigned)vina->vector, hyperv_vp_index(target_vcpu),
+                          active_vtl(target_vcpu));
+        }
         break;
+    }
     case HV_X64_REGISTER_CR_INTERCEPT_CONTROL:
     case HV_X64_REGISTER_CR_INTERCEPT_CR0_MASK:
     case HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK:

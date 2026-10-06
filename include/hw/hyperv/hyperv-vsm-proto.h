@@ -96,9 +96,13 @@ union hv_register_vsm_partition_config {
         uint64_t default_vtl_protection_mask:4;
         uint64_t zero_memory_on_reset:1;
         uint64_t deny_lower_vtl_startup:1;
-        uint64_t reserved0:2;
+        uint64_t intercept_acceptance:1;
+        uint64_t intercept_enable_vtl_protection:1;
         uint64_t intercept_vp_startup:1;
-        uint64_t reserved1:54;
+        uint64_t intercept_cpuid_unimplemented:1;
+        uint64_t intercept_unrecoverable_exception:1;
+        uint64_t intercept_page:1;
+        uint64_t reserved:51;
     };
 };
 
@@ -126,12 +130,27 @@ union hv_register_vsm_vp_status {
 };
 
 /* TLFS 15.6.6 HvRegisterVsmVpSecureVtlConfig */
+/* TLFS 15.6.6 HvRegisterVsmVpSecureConfigVtlN */
 union hv_register_vsm_vp_secure_vtl_config {
     uint64_t as_uint64;
     struct {
         uint64_t mbec_enabled:1;
         uint64_t tlb_locked:1;
-        uint64_t reserved0:62;
+        uint64_t supervisor_shadow_stack_enabled:1;
+        uint64_t hardware_hvpt_enabled:1;
+        uint64_t reserved0:60;
+    };
+};
+
+/* TLFS 15.6.5 HvRegisterVsmVina */
+union hv_register_vsm_vina {
+    uint64_t as_uint64;
+    struct {
+        uint64_t vector:8;
+        uint64_t enabled:1;
+        uint64_t auto_reset:1;
+        uint64_t auto_eoi:1;
+        uint64_t reserved:53;
     };
 };
 
