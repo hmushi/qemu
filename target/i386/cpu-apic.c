@@ -117,10 +117,10 @@ void hmp_info_vtl(MonitorHMP *hmp, const QDict *qdict)
     CPUState *cs;
 
     CPU_FOREACH(cs) {
+        cpu_synchronize_state(cs);
         monitor_hmp_printf(hmp, "\nVP %d VTL %d: halted %d mp_state %d\n",
                            cs->cpu_index, cs->kvm_plane, cs->halted,
                            X86_CPU(cs)->env.mp_state);
-        cpu_synchronize_state(cs);
         cpu_dump_state(cs, NULL, 0);
         x86_cpu_dump_local_apic_state(cs, 0);
     }
