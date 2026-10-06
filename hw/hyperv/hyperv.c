@@ -1985,8 +1985,8 @@ static uint64_t set_vp_register(uint32_t name, struct hv_vp_register_val *val,
         break;
     case HV_X64_REGISTER_PENDING_EVENT0: {
         union hv_x64_pending_exception_event event = {
-            .as_u64[0] = val->low,
-            .as_u64[1] = val->high,
+            .as_uint64[0] = val->low,
+            .as_uint64[1] = val->high,
         };
 
         if (!event.event_pending)
@@ -2618,9 +2618,8 @@ static void print_hyperv_memory_intercept(const struct hyperv_memory_intercept *
             break;
     }
     printf("  instruction_byte_count: %u\n", intercept->instruction_byte_count);
-    printf("  memory_access_info.as_u8: 0x%02" PRIx8 "\n", intercept->memory_access_info.as_u8);
+    printf("  memory_access_info.as_u8: 0x%02" PRIx8 "\n", intercept->memory_access_info.as_uint8);
     printf("  memory_access_info.gva_valid: %u\n", intercept->memory_access_info.gva_valid);
-    printf("  _reserved: 0x%04" PRIx16 "\n", intercept->_reserved);
     printf("  gva: 0x%016" PRIx64 "\n", intercept->gva);
     printf("  gpa: 0x%016" PRIx64 "\n", intercept->gpa);
     printf("  instruction_bytes: ");

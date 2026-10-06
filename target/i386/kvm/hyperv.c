@@ -17,6 +17,7 @@
 #include "hyperv.h"
 #include "hw/hyperv/hyperv.h"
 #include "hyperv-proto.h"
+#include "kvm_i386.h"
 #include "hw/hyperv/vsm-kvm-abi-stub.h"
 
 int hyperv_x86_synic_add(X86CPU *cpu)

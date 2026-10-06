@@ -207,12 +207,6 @@
 #define HV_SYNDBG_STATUS_RESET              (1u << 3)
 #define HV_SYNDBG_STATUS_SET_SIZE(st, sz)   (st | (sz << 16))
 
-struct hv_x64_table_register {
-	uint16_t pad[3];
-	uint16_t limit;
-	uint64_t base;
-} __attribute__ ((__packed__));
-
 struct kvm_hv_vcpu_per_vtl_state {
 	uint64_t rip;
 	uint64_t rsp;
@@ -352,22 +346,6 @@ enum hv_x64_pending_event_type {
 	HV_X64_PENDING_EVENT_HYPERCALL_OUTPUT = 4,
 	HV_X64_PENDING_EXT_INT = 5,
 	HV_X64_PENDING_EVENT_SHADOW_IPT = 6
-};
-
-union hv_x64_pending_exception_event {
-	uint64_t as_u64[2];
-	struct {
-		struct {
-			uint32_t event_pending:1;
-			uint32_t event_type:3;
-			uint32_t _reserved0:4;
-			uint32_t deliver_error_code:1;
-			uint32_t _reserved1:7;
-			uint32_t vector:16;
-		};
-		uint32_t error_code;
-		uint64_t exception_parameter;
-	};
 };
 
 #endif

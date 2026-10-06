@@ -11,6 +11,8 @@
 #define HW_HYPERV_HYPERV_PROTO_H
 
 #include "qemu/bitmap.h"
+#include "hw/hyperv/hvgdk_mini.h"
+#include "hw/hyperv/hvhdk_mini.h"
 
 #define HV_PARTITION_ID_SELF		((uint64_t)-1)
 
@@ -53,9 +55,7 @@
 #define HV_VTL_CALL				              0x0011
 #define HV_VTL_RETURN				          0x0012
 #define HV_SEND_IPI_EX                        0x0015
-#define HVCALL_GET_VP_REGISTERS	              0x0050
-#define HVCALL_SET_VP_REGISTERS			      0x0051
-#define HV_TRANSLATE_VIRTUAL_ADDRESS	      0x0052
+#define HV_TRANSLATE_VIRTUAL_ADDRESS          HVCALL_TRANSLATE_VIRTUAL_ADDRESS
 #define HV_POST_MESSAGE                       0x005c
 #define HV_SIGNAL_EVENT                       0x005d
 #define HV_POST_DEBUG_DATA                    0x0069
@@ -128,28 +128,7 @@
  * VSM registers
  */
 #define HV_X64_REGISTER_PENDING_EVENT0                      0x00010004
-#define HV_X64_REGISTER_RSP                                 0x00020004
-#define HV_X64_REGISTER_RIP                                 0x00020010
-#define HV_X64_REGISTER_RFLAGS                              0x00020011
-#define HV_X64_REGISTER_CR0                                 0x00040000
-#define HV_X64_REGISTER_CR3                                 0x00040002
-#define HV_X64_REGISTER_CR4                                 0x00040003
-#define HV_X64_REGISTER_CR8                                 0x00040004
 #define HV_X64_REGISTER_DR7                                 0x00050005
-#define HV_X64_REGISTER_LDTR                                0x00060006
-#define HV_X64_REGISTER_TR                                  0x00060007
-#define HV_X64_REGISTER_IDTR                                0x00070000
-#define HV_X64_REGISTER_GDTR                                0x00070001
-#define HV_X64_REGISTER_EFER                                0x00080001
-#define HV_X64_REGISTER_APIC_BASE                           0x00080003
-#define HV_X64_REGISTER_SYSENTER_CS                         0x00080005
-#define HV_X64_REGISTER_SYSENTER_EIP                        0x00080006
-#define HV_X64_REGISTER_SYSENTER_ESP                        0x00080007
-#define HV_X64_REGISTER_STAR                                0x00080008
-#define HV_X64_REGISTER_LSTAR                               0x00080009
-#define HV_X64_REGISTER_CSTAR                               0x0008000A
-#define HV_X64_REGISTER_SFMASK                              0x0008000B
-#define HV_X64_REGISTER_TSC_AUX                             0x0008007B
 #define HV_X64_REGISTER_CR_INTERCEPT_CONTROL                0x000E0000
 #define HV_X64_REGISTER_CR_INTERCEPT_CR0_MASK               0x000E0001
 #define HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK               0x000E0002
@@ -190,11 +169,6 @@
 #define HV_IPI_LOW_VECTOR	0x10
 #define HV_IPI_HIGH_VECTOR	0xff
 
-enum HV_GENERIC_SET_FORMAT {
-	HV_GENERIC_SET_SPARSE_4K,
-	HV_GENERIC_SET_ALL,
-};
-
 /*
  * Input structure for POST_MESSAGE hypercall
  */
@@ -230,26 +204,6 @@ struct hyperv_message {
     struct hyperv_message_header header;
     uint8_t payload[HV_MESSAGE_PAYLOAD_SIZE];
 };
-
-struct hv_x64_segment_register {
-	uint64_t base;
-	uint32_t limit;
-	uint16_t selector;
-	union {
-		struct {
-			uint16_t segment_type : 4;
-			uint16_t non_system_segment : 1;
-			uint16_t descriptor_privilege_level : 2;
-			uint16_t present : 1;
-			uint16_t reserved : 4;
-			uint16_t available : 1;
-			uint16_t _long : 1;
-			uint16_t _default : 1;
-			uint16_t granularity : 1;
-		} __attribute__ ((__packed__));
-		uint16_t attributes;
-	};
-} __attribute__ ((__packed__));
 
 struct hyperv_message_page {
     struct hyperv_message slot[HV_SINT_COUNT];
@@ -314,14 +268,6 @@ struct hyperv_retrieve_debug_data_output {
     uint32_t remaining_count;
 } __attribute__ ((__packed__));
 
-union hv_input_vtl {
-	uint8_t as_uint8;
-	struct {
-		uint8_t target_vtl: 4;
-		uint8_t use_target_vtl: 1;
-		uint8_t reserved_z: 3;
-	};
-} __attribute__ ((__packed__));
 
 union hv_register_vsm_code_page_offsets {
 	uint64_t as_u64;
@@ -533,14 +479,6 @@ struct hyperv_intercept_header {
 	uint64_t rip;
 	uint64_t rflags;
 } __attribute__((packed));
-
-union hv_x64_memory_access_info {
-	uint8_t as_u8;
-	struct {
-		uint8_t gva_valid:1;
-		uint8_t _reserved:7;
-	};
-};
 
 struct hyperv_memory_intercept {
 	struct hyperv_intercept_header header;
