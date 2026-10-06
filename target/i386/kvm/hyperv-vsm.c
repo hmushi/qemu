@@ -1346,15 +1346,52 @@ static uint8_t intercept_access_type(uint64_t flags)
     return HV_X64_INTERCEPT_ACCESS_TYPE_EXECUTE;
 }
 
+/* Code segment mode of @env for the instruction length decoder */
+static int cs_mode(CPUX86State *env)
+{
+    if (env->hflags & HF_CS64_MASK) {
+        return 64;
+    }
+    return env->hflags & HF_CS32_MASK ? 32 : 16;
+}
+
+/*
+ * The instruction bytes at RIP and their decoded length. KVM's memory fault
+ * exit carries no instruction length (Paolo Bonzini's memory protection
+ * attributes RFC), so it is decoded here. Returns the number of bytes read
+ * into @insn; 0 when RIP cannot be read, with @len 0 as well.
+ */
+static int read_faulting_insn(CPUState *cs, uint8_t *insn, int size,
+                              uint8_t *len)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+    int n;
+
+    *len = 0;
+    /* RIP is a guest virtual address: walk the faulting VTL's tables */
+    if (cpu_memory_rw_debug(cs, env->eip, insn, size, false)) {
+        return 0;
+    }
+    n = hyperv_vsm_insn_len(insn, size, cs_mode(env));
+    if (n <= 0) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: cannot decode the instruction "
+                      "at rip 0x%" PRIx64 " on VP %u\n", (uint64_t)env->eip,
+                      hyperv_vp_index(cs));
+        return size;
+    }
+    *len = n;
+    return n;
+}
+
 /* TLFS 15.10.2: build the GPA intercept message for a lower-VTL fault */
 static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
-                                   uint64_t gpa, uint64_t flags,
-                                   uint8_t insn_len)
+                                   uint64_t gpa, uint64_t flags)
 {
     struct hv_vsm_memory_intercept_message *icpt = (void *)msg->payload;
     struct hv_x64_intercept_message_header *hdr = &icpt->msg.header;
     CPUX86State *env = &X86_CPU(cs)->env;
     struct hv_x64_segment_register seg;
+    uint8_t insn_len = 0;
 
     QEMU_BUILD_BUG_ON(sizeof(*icpt) > sizeof(msg->payload));
 
@@ -1362,7 +1399,6 @@ static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
     msg->header.payload_size = sizeof(*icpt);
 
     hdr->vp_index = hyperv_vp_index(cs);
-    hdr->instruction_length = insn_len;
     hdr->intercept_access_type = intercept_access_type(flags);
     get_seg(&env->segs[R_CS], &hdr->cs_segment);
     get_seg(&env->segs[R_SS], &seg);
@@ -1381,14 +1417,11 @@ static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
     if (hdr->intercept_access_type == HV_X64_INTERCEPT_ACCESS_TYPE_EXECUTE) {
         icpt->msg.instruction_byte_count = 0;
     } else {
-        /* RIP is a guest virtual address: walk the faulting VTL's tables */
         icpt->msg.instruction_byte_count =
-            MIN(insn_len, sizeof(icpt->msg.instruction_bytes));
-        if (cpu_memory_rw_debug(cs, env->eip, icpt->msg.instruction_bytes,
-                                icpt->msg.instruction_byte_count, false)) {
-            icpt->msg.instruction_byte_count = 0;
-        }
+            read_faulting_insn(cs, icpt->msg.instruction_bytes,
+                               sizeof(icpt->msg.instruction_bytes), &insn_len);
     }
+    hdr->instruction_length = insn_len;
 
     icpt->msg.memory_access_info.gva_valid = 0;
     icpt->msg.guest_virtual_address = 0;
@@ -1460,7 +1493,7 @@ static int deliver_memory_intercept(CPUState *cs,
 }
 
 int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
-                        uint64_t flags, uint8_t insn_len)
+                        uint64_t flags)
 {
     int vtl = active_vtl(cs);
     GHashTable *prots = hv_vsm.prots[vtl];
@@ -1478,8 +1511,8 @@ int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
     }
 
     prot = GPOINTER_TO_UINT(g_hash_table_lookup(prots, GUINT_TO_POINTER(gfn)));
-    trace_hyperv_vsm_handle_fault(hyperv_vp_index(cs), vtl, gpa, size, insn_len,
-                                  flags, prot);
+    trace_hyperv_vsm_handle_fault(hyperv_vp_index(cs), vtl, gpa, size, flags,
+                                  prot);
 
     next = sibling(cs, vtl + 1);
     if (!next) {
@@ -1487,7 +1520,7 @@ int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
     }
 
     cpu_synchronize_state(cs);
-    build_memory_intercept(cs, &msg, gpa, flags, insn_len);
+    build_memory_intercept(cs, &msg, gpa, flags);
     if (deliver_memory_intercept(next, &msg)) {
         return -1;
     }

@@ -6625,8 +6625,7 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         /* RWX fault on a VTL-protected page (kvm-all.c keeps PRIVATE) */
         ret = kvm_hv_handle_fault(cs, run->memory_fault.gpa,
                                   run->memory_fault.size,
-                                  run->memory_fault.flags,
-                                  kvm_run_memory_fault_insn_len(run));
+                                  run->memory_fault.flags);
         break;
     case KVM_EXIT_PLANE_EVENT:
         ret = hv_plane_vtl_event(cs, run);

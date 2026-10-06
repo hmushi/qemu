@@ -38,7 +38,10 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
 
 /* RWX memory fault on a lower VTL: build and post the GPA intercept */
 int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
-                        uint64_t flags, uint8_t insn_len);
+                        uint64_t flags);
+
+/* hyperv-vsm-insn.c: length of the x86 instruction at @buf, 0 if unknown */
+int hyperv_vsm_insn_len(const uint8_t *buf, int len, int mode);
 
 /* TLFS 15.3.1 VTL-shared VP state; see hv_plane_export_shared_state() */
 struct HvVtlSharedState {

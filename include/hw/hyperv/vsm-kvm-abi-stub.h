@@ -105,20 +105,6 @@ static inline struct kvm_run_planes *kvm_run_planes(struct kvm_run *run)
                                              KVM_MEMORY_EXIT_FLAG_EXEC)
 
 /*
- * P3: instruction length on KVM_EXIT_MEMORY_FAULT, appended after size
- * (vsm/next: memory_fault { flags, gpa, size, __u8 insn_len }).
- */
-#ifndef KVM_CAP_FAULT_EXIT_INSN_LEN
-#define KVM_CAP_FAULT_EXIT_INSN_LEN         251 /* placeholder */
-#endif
-
-/* replace by run->memory_fault.insn_len once the header has the field */
-static inline uint8_t kvm_run_memory_fault_insn_len(struct kvm_run *run)
-{
-    return *((uint8_t *)&run->memory_fault + sizeof(run->memory_fault));
-}
-
-/*
  * P3: VSM hypercall exits with XMM payload. Kernel layout (vsm/next):
  * hcall { input, result, params[2], struct kvm_hyperv_xmm_reg xmm[6] }.
  * The stock struct stops at params[2]; the kvm_run union padding covers the
