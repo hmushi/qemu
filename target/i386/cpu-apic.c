@@ -107,6 +107,25 @@ void hmp_info_local_apic(MonitorHMP *hmp, const QDict *qdict)
     x86_cpu_dump_local_apic_state(cs, CPU_DUMP_FPU);
 }
 
+/* KVM's per-VP synthetic controller state, as of the caller's synchronise */
+static void dump_synic_state(MonitorHMP *hmp, CPUState *cs)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+    int i;
+
+    monitor_hmp_printf(hmp, "SynIC: scontrol 0x%016" PRIx64 " siefp 0x%016"
+                       PRIx64 " simp 0x%016" PRIx64 " vp_assist 0x%016"
+                       PRIx64 "\n", env->msr_hv_synic_control,
+                       env->msr_hv_synic_evt_page, env->msr_hv_synic_msg_page,
+                       env->msr_hv_vapic);
+
+    for (i = 0; i < ARRAY_SIZE(env->msr_hv_synic_sint); i++) {
+        monitor_hmp_printf(hmp, "SINT%-2d 0x%08" PRIx64 "%s", i,
+                           env->msr_hv_synic_sint[i],
+                           (i % 4) == 3 ? "\n" : " ");
+    }
+}
+
 /*
  * The VTLs of a VP are separate CPUStates that share a cpu_index and an
  * APIC ID, so neither "info registers" nor "info lapic" can name one. Dump
@@ -123,6 +142,7 @@ void hmp_info_vtl(MonitorHMP *hmp, const QDict *qdict)
                            X86_CPU(cs)->env.mp_state);
         cpu_dump_state(cs, NULL, 0);
         x86_cpu_dump_local_apic_state(cs, 0);
+        dump_synic_state(hmp, cs);
     }
 }
 #endif
