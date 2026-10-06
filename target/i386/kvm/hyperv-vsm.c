@@ -323,6 +323,8 @@ static void hyperv_vsm_zero_memory(void)
  * partition-wide VSM state goes back to its initial values and the lower
  * VTLs' memory protections are lifted.
  */
+static void set_vina(CPUState *cs, uint64_t data);
+
 static void hyperv_vsm_reset(void *opaque)
 {
     CPUState *cs;
@@ -341,7 +343,7 @@ static void hyperv_vsm_reset(void *opaque)
             vpvsm->intercept_route = NULL;
         }
         memset(vpvsm->vtl_config, 0, sizeof(vpvsm->vtl_config));
-        vpvsm->vina.as_uint64 = 0;
+        set_vina(cs, 0);
         vpvsm->vp_status.as_uint64 = 0;
         vpvsm->vp_status.enabled_vtl_set = BIT(0);
         vpvsm->vp_status.active_vtl = active_vtl(cs);
@@ -617,6 +619,46 @@ void hv_plane_import_shared_state(CPUState *cs, const HvVtlSharedState *st)
         val = cpu_get_apic_base(X86_CPU(cs)->apic_state);
         val |= MSR_IA32_APICBASE_BSP;
         cpu_set_apic_base(X86_CPU(cs)->apic_state, val);
+    }
+}
+
+/*
+ * auto_eoi: the VINA vector is delivered without an EOI from the guest.
+ * KVM_HYPERV_SET_AUTO_EOI marks the vector on the VTL's own vCPU fd so its
+ * LAPIC never sets ISR for it. The mark follows the register: set while
+ * enabled && auto_eoi, cleared otherwise and moved on a vector change.
+ */
+static void set_vina_auto_eoi(CPUState *cs, uint8_t vector, bool set)
+{
+    struct kvm_hyperv_auto_eoi arg = {
+        .vector = vector,
+        .set = set ? KVM_HYPERV_AUTO_EOI_SET : KVM_HYPERV_AUTO_EOI_CLEAR,
+    };
+    int ret = kvm_vcpu_ioctl(cs, KVM_HYPERV_SET_AUTO_EOI, &arg);
+
+    if (ret < 0) {
+        error_report("hyperv-vsm: VP %u VTL%d: %s auto-EOI for vector 0x%x: "
+                     "%s", hyperv_vp_index(cs), active_vtl(cs),
+                     set ? "set" : "clear", vector, strerror(-ret));
+    }
+}
+
+static void set_vina(CPUState *cs, uint64_t data)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+    union hv_register_vsm_vina old = vpvsm->vina;
+    union hv_register_vsm_vina new = { .as_uint64 = data };
+    bool old_mark = old.enabled && old.auto_eoi;
+    bool new_mark = new.enabled && new.auto_eoi;
+
+    vpvsm->vina = new;
+    trace_hyperv_vsm_vina_config(hyperv_vp_index(cs), active_vtl(cs), data);
+
+    if (old_mark && (!new_mark || old.vector != new.vector)) {
+        set_vina_auto_eoi(cs, old.vector, false);
+    }
+    if (new_mark && (!old_mark || old.vector != new.vector)) {
+        set_vina_auto_eoi(cs, new.vector, true);
     }
 }
 
@@ -1212,14 +1254,9 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         env->msr_hv_vapic = val->low_part;
         setup_vp_assist(target_vcpu, val->low_part);
         break;
-    case HV_REGISTER_VSM_VINA: {
-        union hv_register_vsm_vina *vina = &get_vp_vsm(target_vcpu)->vina;
-
-        vina->as_uint64 = val->low_part;
-        trace_hyperv_vsm_vina_config(hyperv_vp_index(target_vcpu),
-                                     active_vtl(target_vcpu), val->low_part);
+    case HV_REGISTER_VSM_VINA:
+        set_vina(target_vcpu, val->low_part);
         break;
-    }
     case HV_X64_REGISTER_CR_INTERCEPT_CONTROL:
     case HV_X64_REGISTER_CR_INTERCEPT_CR0_MASK:
     case HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK:
