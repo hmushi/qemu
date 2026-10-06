@@ -166,6 +166,11 @@ void x86_cpu_plug(const HotplugHandler *hotplug_dev,
     X86CPU *cpu = X86_CPU(dev);
     X86MachineState *x86ms = X86_MACHINE(hotplug_dev);
 
+    /* a KVM plane vCPU is not a new CPU: no slot, no ACPI event, no SMM */
+    if (CPU(dev)->kvm_plane_leader) {
+        return;
+    }
+
     if (x86ms->acpi_dev) {
         hotplug_handler_plug(x86ms->acpi_dev, dev, &local_err);
         if (local_err) {
@@ -208,6 +213,11 @@ void x86_cpu_unplug_request_cb(const HotplugHandler *hotplug_dev,
 
     if (!x86ms->acpi_dev) {
         error_setg(errp, "CPU hot unplug not supported without ACPI");
+        return;
+    }
+
+    if (CPU(dev)->kvm_plane_leader) {
+        error_setg(errp, "KVM plane vCPUs cannot be unplugged");
         return;
     }
 
@@ -264,6 +274,24 @@ void x86_cpu_pre_plug(const HotplugHandler *hotplug_dev,
     if (!object_dynamic_cast(OBJECT(cpu), ms->cpu_type)) {
         error_setg(errp, "Invalid CPU type, expected cpu type: '%s'",
                    ms->cpu_type);
+        return;
+    }
+
+    /*
+     * A KVM plane vCPU is a second execution context of an existing CPU:
+     * same APIC ID, topology and cpu_index, no slot of its own.
+     */
+    if (CPU(cpu)->kvm_plane_leader) {
+        X86CPU *leader = X86_CPU(CPU(cpu)->kvm_plane_leader);
+
+        cpu->apic_id = leader->apic_id;
+        cpu->socket_id = leader->socket_id;
+        cpu->die_id = leader->die_id;
+        cpu->module_id = leader->module_id;
+        cpu->core_id = leader->core_id;
+        cpu->thread_id = leader->thread_id;
+        *topo_info = leader->env.topo_info;
+        CPU(cpu)->cpu_index = CPU(leader)->cpu_index;
         return;
     }
 

@@ -105,6 +105,10 @@ int hv_plane_run_vtl(CPUState *cs, int target_vtl, HvPlaneSwitchReason reason)
     return -ENOSYS;
 }
 
+void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
+{
+}
+
 int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run)
 {
     trace_hyperv_vsm_plane_stub("hv_plane_vtl_event", run->plane_event.plane);

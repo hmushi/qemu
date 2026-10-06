@@ -289,6 +289,8 @@ static void apic_common_realize(DeviceState *dev, Error **errp)
         info->enable_tpr_reporting(s, true);
     }
 
+    /* a KVM plane vCPU's APIC has the APIC ID of its plane-0 sibling */
+    instance_id |= CPU(s->cpu)->kvm_plane << 16;
     vmstate_register_with_alias_id(NULL, instance_id, &vmstate_apic_common,
                                    s, -1, 0, NULL);
 

@@ -51,6 +51,10 @@ int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run)
     return -1;
 }
 
+void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
+{
+}
+
 CPUState *hv_plane_vcpu(uint32_t vp_index, int vtl)
 {
     return vtl == 0 ? qemu_get_cpu(vp_index) : NULL;

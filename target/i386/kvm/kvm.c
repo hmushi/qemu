@@ -905,6 +905,11 @@ static int kvm_arch_set_tsc_khz(CPUState *cs)
         return 0;
     }
 
+    /* the TSC is shared with the plane-0 vCPU; KVM_SET_TSC_KHZ is per vCPU */
+    if (cs->kvm_plane) {
+        return 0;
+    }
+
     if (!env->tsc_khz) {
         return 0;
     }
@@ -2235,6 +2240,46 @@ static void kvm_init_pmu_info(struct kvm_cpuid2 *cpuid, X86CPU *cpu)
     }
 }
 
+/*
+ * A plane > 0 vCPU shares CPUID, the TSC and the MCE setup with its plane-0
+ * sibling in the kernel, and its fd accepts only the register ioctls, so it
+ * skips most of kvm_arch_init_vcpu(). It still needs the QEMU-side buffers,
+ * the Hyper-V per-vCPU state (SynIC, VSM) and the MSR init.
+ */
+static int kvm_arch_init_plane_vcpu(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    X86CPU *leader = X86_CPU(cs->kvm_plane_leader);
+    CPUX86State *env = &cpu->env;
+    int r;
+
+    env->tsc_khz = leader->env.tsc_khz;
+    env->apic_bus_freq = KVM_APIC_BUS_FREQUENCY;
+
+    /* MCG_CAP is VTL-shared state */
+    env->mcg_cap = leader->env.mcg_cap;
+    if (env->mcg_cap) {
+        r = kvm_vcpu_ioctl(cs, KVM_X86_SETUP_MCE, &env->mcg_cap);
+        if (r < 0) {
+            error_report("KVM_X86_SETUP_MCE on plane vCPU: %s", strerror(-r));
+            return r;
+        }
+    }
+
+    r = hyperv_init_vcpu(cpu);
+    if (r) {
+        return r;
+    }
+
+    cpu->vmsentry = qemu_add_vm_change_state_handler(cpu_update_state, env);
+
+    kvm_init_xsave(env);
+    cpu->kvm_msr_buf = g_malloc0(MSR_BUF_SIZE);
+    kvm_init_msrs(cpu);
+
+    return 0;
+}
+
 int kvm_arch_init_vcpu(CPUState *cs)
 {
     struct {
@@ -2258,6 +2303,10 @@ int kvm_arch_init_vcpu(CPUState *cs)
     int max_nested_state_len;
     int r;
     Error *local_err = NULL;
+
+    if (cs->kvm_plane) {
+        return kvm_arch_init_plane_vcpu(cs);
+    }
 
     if (current_machine->cgs) {
         r = x86_confidential_guest_check_features(
@@ -6021,6 +6070,11 @@ void kvm_arch_pre_run(CPUState *cpu, struct kvm_run *run)
 
         DPRINTF("setting tpr\n");
         run->cr8 = cpu_get_apic_tpr(x86_cpu->apic_state);
+    }
+
+    /* VTL switch bookkeeping and req_exit_planes */
+    if (cpu->kvm_plane || cpu->kvm_plane_next) {
+        hv_plane_pre_run(cpu, run);
     }
 }
 

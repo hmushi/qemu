@@ -304,11 +304,14 @@ const VMStateDescription vmstate_cpu_common = {
 
 void cpu_vmstate_register(CPUState *cpu)
 {
+    /* a KVM plane vCPU shares cpu_index with its plane-0 sibling */
+    int instance_id = cpu->cpu_index | cpu->kvm_plane << 16;
+
     if (qdev_get_vmsd(DEVICE(cpu)) == NULL) {
-        vmstate_register(NULL, cpu->cpu_index, &vmstate_cpu_common, cpu);
+        vmstate_register(NULL, instance_id, &vmstate_cpu_common, cpu);
     }
     if (cpu->cc->sysemu_ops->legacy_vmsd != NULL) {
-        vmstate_register(NULL, cpu->cpu_index,
+        vmstate_register(NULL, instance_id,
                          cpu->cc->sysemu_ops->legacy_vmsd, cpu);
     }
 }

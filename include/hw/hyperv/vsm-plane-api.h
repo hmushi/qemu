@@ -259,6 +259,14 @@ int hv_plane_run_vtl(CPUState *cs, int vtl, HvPlaneSwitchReason reason);
 int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run);
 
 /*
+ * hv_plane_pre_run: called by kvm_arch_pre_run() right before KVM_RUN on a
+ * CPUState that has planes (a leader with plane vCPUs, or a plane vCPU).
+ * Writes the run form 2 kvm_run fields (plane to run, req_exit_planes) and
+ * does any per-entry bookkeeping of the switch. No ioctl.
+ */
+void hv_plane_pre_run(CPUState *cs, struct kvm_run *run);
+
+/*
  * hv_plane_translate: walk the page tables of plane vCPU @cs
  * (HvCallTranslateVirtualAddress).
  *
