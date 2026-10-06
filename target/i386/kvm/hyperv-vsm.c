@@ -44,10 +44,7 @@ static struct {
     union hv_register_vsm_capabilities capabilities;
     union hv_register_vsm_partition_config partition_config[HV_NUM_VTLS];
     /* HV_X64_MSR_HYPERCALL is partition-wide (TLFS 3.13): one per VTL */
-    struct {
-        uint64_t msr;
-        void *page;
-    } hypercall[HV_NUM_VTLS];
+    uint64_t hypercall[HV_NUM_VTLS];
 } hv_vsm = {
     .vtl_enabled_for_vps = BIT(0),
     .partition_status = {
@@ -65,7 +62,6 @@ struct VpVsmState {
     union hv_register_vsm_vp_status vp_status;
     union hv_register_vsm_vp_secure_vtl_config vtl_config[HV_NUM_VTLS];
     uint64_t msr_hv_vp_assist;
-    void *vp_assist;
     HvSintRoute *intercept_route;
     struct hyperv_message intercept_msg;
     /* HvRegisterVsmVina (TLFS 15.6.5) */
@@ -110,13 +106,13 @@ static MemTxResult vsm_physmem_read(CPUState *cs, hwaddr addr,
 
 /*
  * Hypercall page: VMCALL/VMMCALL stub plus the VTL call/return entry stubs.
- * Written by any VP of the VTL, in effect for all of them. A disable only
- * drops the mapping: the guest may still be returning through the page.
+ * Written by any VP of the VTL, in effect for all of them. Two VTLs may
+ * enable the same page: each write puts the same stubs there. A disable
+ * writes nothing, as the guest may still be returning through the page.
  */
 static void setup_hypercall_page(CPUState *cs, uint64_t data)
 {
     hwaddr gpa = data & HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_MASK;
-    hwaddr len = 1 << HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_SHIFT;
     bool enable = !!(data & HV_X64_MSR_HYPERCALL_ENABLE);
     int vtl = active_vtl(cs);
     uint32_t ebx = 0, ecx = 0, edx = 0;
@@ -130,23 +126,9 @@ static void setup_hypercall_page(CPUState *cs, uint64_t data)
     trace_hyperv_vsm_setup_hypercall_page(hyperv_vp_index(cs), vtl, enable,
                                           gpa);
 
-    hv_vsm.hypercall[vtl].msr = data;
-
-    if (hv_vsm.hypercall[vtl].page) {
-        address_space_unmap(cs->as, hv_vsm.hypercall[vtl].page, len, true,
-                            len);
-        hv_vsm.hypercall[vtl].page = NULL;
-    }
+    hv_vsm.hypercall[vtl] = data;
 
     if (!enable) {
-        return;
-    }
-
-    hv_vsm.hypercall[vtl].page = address_space_map(cs->as, gpa, &len, true,
-                                                   MEMTXATTRS_UNSPECIFIED);
-    if (!hv_vsm.hypercall[vtl].page) {
-        error_report("hyperv-vsm: cannot map hypercall page at 0x%" HWADDR_PRIx,
-                     gpa);
         return;
     }
 
@@ -185,7 +167,11 @@ static void setup_hypercall_page(CPUState *cs, uint64_t data)
     insn[i++] = 0xeb;
     insn[i++] = 0xd6;
 
-    memcpy(hv_vsm.hypercall[vtl].page, insn, i);
+    if (address_space_write(cs->as, gpa, MEMTXATTRS_UNSPECIFIED, insn, i)
+        != MEMTX_OK) {
+        error_report("hyperv-vsm: cannot write the hypercall page at 0x%"
+                     HWADDR_PRIx, gpa);
+    }
 }
 
 static bool hypercall_page_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
@@ -205,7 +191,7 @@ static bool hypercall_page_rdmsr(X86CPU *cpu, uint32_t msr, uint64_t *val)
         return false;
     }
 
-    *val = hv_vsm.hypercall[active_vtl(CPU(cpu))].msr;
+    *val = hv_vsm.hypercall[active_vtl(CPU(cpu))];
     trace_hyperv_vsm_hypercall_msr_read(hyperv_vp_index(CPU(cpu)),
                                         active_vtl(CPU(cpu)), *val);
     return true;
@@ -238,36 +224,17 @@ static bool msr_eoi_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
     return true;
 }
 
+/* KVM clears apic_assist on the write; the rest of the page is the guest's */
 static void setup_vp_assist(CPUState *cs, uint64_t data)
 {
     hwaddr gpa = data & HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_MASK;
-    hwaddr len = 1 << HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_SHIFT;
     bool enable = !!(data & HV_X64_MSR_VP_ASSIST_PAGE_ENABLE);
     VpVsmState *vpvsm = get_vp_vsm(cs);
 
     trace_hyperv_vsm_setup_vp_assist_page(hyperv_vp_index(cs), active_vtl(cs),
                                           enable, gpa);
-    if (!vpvsm) {
-        return;
-    }
-
-    vpvsm->msr_hv_vp_assist = data;
-
-    if (vpvsm->vp_assist) {
-        address_space_unmap(cs->as, vpvsm->vp_assist, len, true, len);
-        vpvsm->vp_assist = NULL;
-    }
-
-    if (!enable) {
-        return;
-    }
-
-    /* KVM clears apic_assist on the MSR write; the rest is the guest's */
-    vpvsm->vp_assist = address_space_map(cs->as, gpa, &len, true,
-                                         MEMTXATTRS_UNSPECIFIED);
-    if (!vpvsm->vp_assist) {
-        error_report("hyperv-vsm: cannot map VP assist page at 0x%" HWADDR_PRIx,
-                     gpa);
+    if (vpvsm) {
+        vpvsm->msr_hv_vp_assist = data;
     }
 }
 
@@ -559,24 +526,35 @@ static bool vp_assist_enabled(CPUState *cs)
 {
     VpVsmState *vpvsm = get_vp_vsm(cs);
 
-    return vpvsm && vpvsm->vp_assist;
+    return vpvsm &&
+           (vpvsm->msr_hv_vp_assist & HV_X64_MSR_VP_ASSIST_PAGE_ENABLE);
+}
+
+static hwaddr vtl_control_gpa(CPUState *cs)
+{
+    return (get_vp_vsm(cs)->msr_hv_vp_assist &
+            HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_MASK) +
+           offsetof(struct hv_vp_assist_page, vtl_control);
 }
 
 static void write_vtl_control(CPUState *cs, const struct hv_vp_vtl_control *ctl)
 {
-    VpVsmState *vpvsm = get_vp_vsm(cs);
-
-    memcpy(vpvsm->vp_assist + offsetof(struct hv_vp_assist_page, vtl_control),
-           ctl, sizeof(*ctl));
+    if (address_space_write(cs->as, vtl_control_gpa(cs),
+                            MEMTXATTRS_UNSPECIFIED, ctl,
+                            sizeof(*ctl)) != MEMTX_OK) {
+        error_report("hyperv-vsm: VP %u VTL%d: cannot write vtl_control",
+                     hyperv_vp_index(cs), active_vtl(cs));
+    }
 }
 
 static void read_vtl_control(CPUState *cs, struct hv_vp_vtl_control *ctl)
 {
-    VpVsmState *vpvsm = get_vp_vsm(cs);
-
-    memcpy(ctl,
-           vpvsm->vp_assist + offsetof(struct hv_vp_assist_page, vtl_control),
-           sizeof(*ctl));
+    if (address_space_read(cs->as, vtl_control_gpa(cs), MEMTXATTRS_UNSPECIFIED,
+                           ctl, sizeof(*ctl)) != MEMTX_OK) {
+        error_report("hyperv-vsm: VP %u VTL%d: cannot read vtl_control",
+                     hyperv_vp_index(cs), active_vtl(cs));
+        memset(ctl, 0, sizeof(*ctl));
+    }
 }
 
 void hv_plane_export_shared_state(CPUState *cs, HvVtlSharedState *st)
@@ -1456,7 +1434,7 @@ static bool gpa_is_overlay(CPUState *cs, uint64_t gpa)
 {
     VpVsmState *vpvsm = get_vp_vsm(cs);
 
-    uint64_t hcall = hv_vsm.hypercall[active_vtl(cs)].msr &
+    uint64_t hcall = hv_vsm.hypercall[active_vtl(cs)] &
                      HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_MASK;
     uint64_t assist = vpvsm->msr_hv_vp_assist &
                       HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_MASK;
