@@ -753,6 +753,175 @@ err:
     return ret;
 }
 
+/*
+ * KVM planes (KVM_CREATE_PLANE). A plane > 0 vCPU is created on the plane fd
+ * with the id of an existing plane-0 vCPU and shares that vCPU's kvm_run page
+ * and preempt notifier in the kernel, so it is created from, and only ever
+ * driven by, the plane-0 vCPU's host thread. In QEMU the plane vCPU is its
+ * own CPUState (register file, kvm_fd) that borrows the leader's thread,
+ * thread id and halt condition; the leader's thread runs whichever CPUState
+ * kvm_plane_select() picked last: KVM_RUN always goes to the plane-0 fd with
+ * kvm_run->plane naming the plane (KVM_CAP_PLANES_USERSPACE_SWITCH).
+ */
+static void kvm_init_planes(KVMState *s)
+{
+    /* KVM_CAP_PLANES on the VM fd returns the number of planes it supports */
+    if (kvm_vm_check_extension(s, KVM_CAP_PLANES) <= 1 ||
+        !kvm_vm_check_extension(s, KVM_CAP_PLANES_USERSPACE_SWITCH)) {
+        return;
+    }
+    /* must precede the first vCPU; the planes are created on demand */
+    s->planes_userspace_switch =
+        !kvm_vm_enable_cap(s, KVM_CAP_PLANES_USERSPACE_SWITCH, 0, 0);
+}
+
+int kvm_create_plane(int plane)
+{
+    KVMState *s = kvm_state;
+    int fd;
+
+    if (plane <= 0 || plane >= KVM_MAX_PLANES) {
+        return -EINVAL;
+    }
+    if (s->plane_fd[plane] > 0) {
+        return -EEXIST;
+    }
+    if (!s->planes_userspace_switch ||
+        kvm_vm_check_extension(s, KVM_CAP_PLANES) <= plane) {
+        return -ENOTSUP;
+    }
+
+    fd = kvm_vm_ioctl(s, KVM_CREATE_PLANE, plane);
+    if (fd < 0) {
+        return fd;
+    }
+    s->plane_fd[plane] = fd;
+    trace_kvm_create_plane(plane, fd);
+    return 0;
+}
+
+int kvm_plane_ioctl(int plane, unsigned long type, ...)
+{
+    KVMState *s = kvm_state;
+    int ret;
+    void *arg;
+    va_list ap;
+
+    if (plane <= 0 || plane >= KVM_MAX_PLANES || s->plane_fd[plane] <= 0) {
+        return -ENOENT;
+    }
+
+    va_start(ap, type);
+    arg = va_arg(ap, void *);
+    va_end(ap);
+
+    trace_kvm_plane_ioctl(plane, type, arg);
+    accel_ioctl_begin();
+    ret = ioctl(s->plane_fd[plane], type, arg);
+    if (ret == -1) {
+        ret = -errno;
+    }
+    accel_ioctl_end();
+    return ret;
+}
+
+/*
+ * Create the KVM vCPU of @cpu on plane @cpu->kvm_plane. Runs on the thread of
+ * @cpu->kvm_plane_leader with the BQL held; the caller set kvm_plane and
+ * kvm_plane_leader before realizing @cpu.
+ */
+int kvm_init_plane_vcpu(CPUState *cpu, Error **errp)
+{
+    CPUState *leader = cpu->kvm_plane_leader;
+    KVMState *s = kvm_state;
+    unsigned long vcpu_id = kvm_arch_vcpu_id(cpu);
+    CPUState **tail;
+    int ret;
+
+    assert(leader && !leader->kvm_plane_leader && cpu->kvm_plane > 0);
+    assert(qemu_cpu_is_self(leader));
+    assert(vcpu_id == kvm_arch_vcpu_id(leader));
+
+    trace_kvm_init_plane_vcpu(cpu->cpu_index, vcpu_id, cpu->kvm_plane);
+
+    ret = kvm_plane_ioctl(cpu->kvm_plane, KVM_CREATE_VCPU, vcpu_id);
+    if (ret < 0) {
+        error_setg_errno(errp, -ret, "kvm_init_plane_vcpu: KVM_CREATE_VCPU "
+                         "failed (%lu, plane %d)", vcpu_id, cpu->kvm_plane);
+        return ret;
+    }
+    kvm_create_vcpu_internal(cpu, s, ret);
+
+    /* the kvm_run page is the leader's */
+    cpu->kvm_run = leader->kvm_run;
+
+    if (s->kvm_dirty_ring_size) {
+        ret = map_kvm_dirty_gfns(s, cpu, errp);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    ret = kvm_arch_init_vcpu(cpu);
+    if (ret < 0) {
+        error_setg_errno(errp, -ret,
+                         "kvm_init_plane_vcpu: kvm_arch_init_vcpu failed (%lu)",
+                         vcpu_id);
+        return ret;
+    }
+
+    /* the leader's thread drives this CPUState */
+    g_free(cpu->thread);
+    qemu_cond_destroy(cpu->halt_cond);
+    g_free(cpu->halt_cond);
+    cpu->thread = leader->thread;
+    cpu->thread_id = leader->thread_id;
+    cpu->halt_cond = leader->halt_cond;
+    cpu->kvm_plane_active = cpu;
+
+    /* readers walk the list without the BQL (hv_plane_vcpu()) */
+    for (tail = &leader->kvm_plane_next; *tail;
+         tail = &(*tail)->kvm_plane_next) {
+        assert((*tail)->kvm_plane != cpu->kvm_plane);
+    }
+    qatomic_rcu_set(tail, cpu);
+
+    return 0;
+}
+
+CPUState *kvm_plane_run_cpu(CPUState *leader)
+{
+    return leader->kvm_plane_active ? leader->kvm_plane_active : leader;
+}
+
+void kvm_plane_select(CPUState *cpu)
+{
+    CPUState *leader = cpu->kvm_plane_leader ? cpu->kvm_plane_leader : cpu;
+
+    assert(qemu_cpu_is_self(leader));
+    trace_kvm_plane_select(leader->cpu_index, cpu->kvm_plane);
+    leader->kvm_plane_active = cpu;
+}
+
+/* KVM_RUN goes to the plane-0 fd; kvm_run->plane selects the plane to run */
+static int kvm_vcpu_run(CPUState *cpu)
+{
+    CPUState *leader = cpu->kvm_plane_leader ? cpu->kvm_plane_leader : cpu;
+    int ret;
+
+    if (kvm_state->planes_userspace_switch) {
+        cpu->kvm_run->plane = cpu->kvm_plane;
+    }
+    trace_kvm_vcpu_ioctl(cpu->cpu_index, KVM_RUN, NULL);
+    accel_cpu_ioctl_begin(cpu);
+    ret = ioctl(leader->kvm_fd, KVM_RUN, 0);
+    accel_cpu_ioctl_end(cpu);
+    if (ret == -1) {
+        ret = -errno;
+    }
+    return ret;
+}
+
 void kvm_close(void)
 {
     CPUState *cpu;
@@ -770,6 +939,12 @@ void kvm_close(void)
     }
 
     if (kvm_state && kvm_state->fd != -1) {
+        for (int i = 1; i < KVM_MAX_PLANES; i++) {
+            if (kvm_state->plane_fd[i] > 0) {
+                close(kvm_state->plane_fd[i]);
+                kvm_state->plane_fd[i] = 0;
+            }
+        }
         close(kvm_state->vmfd);
         kvm_state->vmfd = -1;
         close(kvm_state->fd);
@@ -3079,6 +3254,7 @@ static int kvm_init(AccelState *as, MachineState *ms)
     if (s->kernel_irqchip_allowed) {
         kvm_irqchip_create(s);
     }
+    kvm_init_planes(s);
 
     s->memory_listener.listener.eventfd_add = kvm_mem_ioeventfd_add;
     s->memory_listener.listener.eventfd_del = kvm_mem_ioeventfd_del;
@@ -3469,7 +3645,7 @@ int kvm_cpu_exec(CPUState *cpu)
             kvm_cpu_kick_self();
         }
 
-        run_ret = kvm_vcpu_ioctl(cpu, KVM_RUN, 0);
+        run_ret = kvm_vcpu_run(cpu);
 
         /*
          * After writing cpu->exit_request, cpu_exit() sends a signal that writes

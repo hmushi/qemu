@@ -320,6 +320,34 @@ int kvm_create_device(KVMState *s, uint64_t type, bool test);
 bool kvm_device_supported(int vmfd, uint64_t type);
 
 /**
+ * kvm_create_plane - create KVM plane @plane (KVM_CREATE_PLANE)
+ * @plane: plane id, 1..KVM_MAX_PLANES-1
+ *
+ * Returns 0 or -errno (-ENOTSUP without KVM_CAP_PLANES_USERSPACE_SWITCH).
+ * Memory, clock and irqchip are shared with plane 0.
+ */
+int kvm_create_plane(int plane);
+
+/**
+ * kvm_plane_ioctl - ioctl on the fd of @plane (KVM_CREATE_VCPU, KVM_SIGNAL_MSI)
+ */
+int kvm_plane_ioctl(int plane, unsigned long type, ...);
+
+/**
+ * kvm_plane_run_cpu - the CPUState the host thread of @leader runs next
+ *
+ * The leader itself, or the plane vCPU selected with kvm_plane_select().
+ */
+CPUState *kvm_plane_run_cpu(CPUState *leader);
+
+/**
+ * kvm_plane_select - make @cpu the CPUState its leader's thread runs next
+ *
+ * Called from that thread. The current kvm_cpu_exec() must return first.
+ */
+void kvm_plane_select(CPUState *cpu);
+
+/**
  * kvm_create_and_park_vcpu - Create and park a KVM vCPU
  * @cpu: QOM CPUState object for which KVM vCPU has to be created and parked.
  *

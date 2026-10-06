@@ -465,6 +465,13 @@ struct qemu_work_item;
  *    ring is enabled.
  * @kvm_fetch_index: Keeps the index that we last fetched from the per-vCPU
  *    dirty ring structure.
+ * @kvm_plane: KVM plane this vCPU belongs to; a plane > 0 vCPU is a second
+ *    execution context of the plane-0 vCPU with the same id.
+ * @kvm_plane_leader: for a plane > 0 vCPU, the plane-0 CPUState whose host
+ *    thread, kvm_run page and halt condition it shares.
+ * @kvm_plane_next: on the leader, singly linked list of its plane > 0 vCPUs.
+ * @kvm_plane_active: on the leader, the CPUState the thread runs next (the
+ *    leader itself or one of its plane vCPUs).
  *
  * @neg_align: The CPUState is the common part of a concrete ArchCPU
  * which is allocated when an individual CPU instance is created. As
@@ -546,6 +553,10 @@ struct CPUState {
     uint32_t kvm_fetch_index;
     uint64_t dirty_pages;
     int kvm_vcpu_stats_fd;
+    int kvm_plane;
+    struct CPUState *kvm_plane_leader;
+    struct CPUState *kvm_plane_next;
+    struct CPUState *kvm_plane_active;
 
     /* Use by accel-block: CPU is executing an ioctl() */
     QemuLockCnt in_ioctl_lock;

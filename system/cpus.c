@@ -79,9 +79,23 @@ bool cpu_work_list_empty(const CPUState *cpu)
     return QSIMPLEQ_EMPTY_ATOMIC(&cpu->work_list);
 }
 
+/* a plane > 0 vCPU's stop request or queued work is handled by its leader */
+static bool cpu_plane_events_pending(CPUState *leader)
+{
+    CPUState *cpu;
+
+    for (cpu = leader->kvm_plane_next; cpu; cpu = cpu->kvm_plane_next) {
+        if (cpu->stop || !cpu_work_list_empty(cpu)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool cpu_thread_is_idle(CPUState *cpu)
 {
-    if (cpu->stop || !cpu_work_list_empty(cpu)) {
+    if (cpu->stop || !cpu_work_list_empty(cpu) ||
+        cpu_plane_events_pending(cpu)) {
         return false;
     }
     if (cpu_is_stopped(cpu)) {
@@ -395,11 +409,22 @@ static void qemu_cpu_stop(CPUState *cpu, bool exit)
 
 void qemu_process_cpu_events_common(CPUState *cpu)
 {
+    CPUState *plane;
+
     qatomic_set_mb(&cpu->thread_kicked, false);
     if (cpu->stop) {
         qemu_cpu_stop(cpu, false);
     }
     process_queued_cpu_work(cpu);
+
+    for (plane = cpu->kvm_plane_next; plane; plane = plane->kvm_plane_next) {
+        qatomic_set_mb(&plane->thread_kicked, false);
+        qatomic_set(&plane->exit_request, false);
+        if (plane->stop) {
+            qemu_cpu_stop(plane, false);
+        }
+        process_queued_cpu_work(plane);
+    }
 }
 
 void qemu_process_cpu_events(CPUState *cpu)

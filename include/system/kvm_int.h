@@ -108,6 +108,8 @@ struct KVMState
     int nr_slots_max;
     int fd;
     int vmfd;
+    int plane_fd[KVM_MAX_PLANES];   /* KVM_CREATE_PLANE fds; [0] unused */
+    bool planes_userspace_switch;   /* KVM_CAP_PLANES_USERSPACE_SWITCH on */
     int coalesced_mmio;
     int coalesced_pio;
     struct kvm_coalesced_mmio_ring *coalesced_mmio_ring;
