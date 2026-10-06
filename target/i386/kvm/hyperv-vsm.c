@@ -520,7 +520,6 @@ void hv_plane_export_shared_state(CPUState *cs, HvVtlSharedState *st)
     memcpy(st->mtrr_var, env->mtrr_var, sizeof(st->mtrr_var));
     st->mcg_cap = env->mcg_cap;
     st->mcg_status = env->mcg_status;
-    st->msr_hv_tsc = env->msr_hv_tsc;
     st->msr_hv_runtime = env->msr_hv_runtime;
 
     st->fpstt = env->fpstt;
@@ -554,7 +553,6 @@ void hv_plane_import_shared_state(CPUState *cs, const HvVtlSharedState *st)
     memcpy(env->mtrr_var, st->mtrr_var, sizeof(env->mtrr_var));
     env->mcg_cap = st->mcg_cap;
     env->mcg_status = st->mcg_status;
-    env->msr_hv_tsc = st->msr_hv_tsc;
     env->msr_hv_runtime = st->msr_hv_runtime;
 
     env->fpstt = st->fpstt;

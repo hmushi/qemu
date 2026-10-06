@@ -197,14 +197,15 @@ int hv_plane_set_memory_attrs(int vtl, hwaddr addr, hwaddr size,
  * (hyperv-vsm.c) because the field list is Hyper-V semantics:
  *   shared: RAX RBX RCX RDX RSI RDI RBP R8-R15 (not RSP), DR0-DR5, CR2,
  *           XCR0, MTRRs (fixed, variable, default type), MCG_CAP and
- *           MCG_STATUS, HV_X64_MSR_REFERENCE_TSC and HV_X64_MSR_VP_RUNTIME,
- *           the FPU/SSE state (x87 registers, control and status, XMM,
+ *           MCG_STATUS, HV_X64_MSR_VP_RUNTIME, the FPU/SSE state (x87
+ *           registers, control and status, XMM,
  *           MXCSR, XSTATE_BV); VP0 keeps the APIC BSP bit in every plane.
  *   private (stays with the plane vCPU): RIP RSP RFLAGS, CR0 CR3 CR4, DR6
  *           DR7, segment registers, IDTR GDTR LDTR TR, EFER, SYSENTER_*,
  *           STAR LSTAR CSTAR SFMASK, FS/GS base, KERNEL_GS_BASE, TSC_AUX,
- *           PAT, the Hyper-V MSRs (SynIC, STIMER, hypercall, VP assist),
- *           the LAPIC.
+ *           PAT, the Hyper-V MSRs (SynIC, STIMER, hypercall, VP assist,
+ *           REFERENCE_TSC: the page GPA is per VTL, its content is
+ *           partition-wide), the LAPIC.
  * No ioctl: the copy is between the two QEMU register files.
  */
 typedef struct HvVtlSharedState HvVtlSharedState;

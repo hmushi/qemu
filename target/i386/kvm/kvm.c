@@ -4461,16 +4461,17 @@ static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
 
         /*
          * Hyper-V partition-wide MSRs: to avoid clearing them on cpu hot-add,
-         * only sync them to KVM from the first cpu. A plane > 0 vCPU of VP0
-         * is not it: its zero GUEST_OS_ID would disable the VM-wide
-         * hypercall page. REFERENCE_TSC is per plane with partition-wide
-         * content, so every plane's VP0 writes it.
+         * only sync them to KVM from the first cpu. Test the vCPU being put,
+         * not current_cpu: a plane > 0 vCPU is put from its sibling's thread,
+         * and its zero GUEST_OS_ID would disable the VM-wide hypercall page.
+         * REFERENCE_TSC is per plane with partition-wide content, so VP0 of
+         * every plane writes it.
          */
         if (hyperv_feat_enabled(cpu, HYPERV_FEAT_TIME) &&
-            hyperv_vp_index(current_cpu) == 0) {
+            hyperv_vp_index(CPU(cpu)) == 0) {
             kvm_msr_entry_add(cpu, HV_X64_MSR_REFERENCE_TSC, env->msr_hv_tsc);
         }
-        if (current_cpu == first_cpu) {
+        if (CPU(cpu) == first_cpu && !CPU(cpu)->kvm_plane) {
             if (has_msr_hv_hypercall) {
                 kvm_msr_entry_add(cpu, HV_X64_MSR_GUEST_OS_ID,
                                   env->msr_hv_guest_os_id);

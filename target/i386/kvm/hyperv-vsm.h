@@ -52,7 +52,6 @@ struct HvVtlSharedState {
     MTRRVar mtrr_var[MSR_MTRRcap_VCNT];
     uint64_t mcg_cap;
     uint64_t mcg_status;
-    uint64_t msr_hv_tsc;
     uint64_t msr_hv_runtime;
     unsigned int fpstt;
     uint16_t fpus;
