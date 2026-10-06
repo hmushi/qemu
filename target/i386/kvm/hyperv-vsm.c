@@ -206,6 +206,8 @@ static bool hypercall_page_rdmsr(X86CPU *cpu, uint32_t msr, uint64_t *val)
     }
 
     *val = hv_vsm.hypercall[active_vtl(CPU(cpu))].msr;
+    trace_hyperv_vsm_hypercall_msr_read(hyperv_vp_index(CPU(cpu)),
+                                        active_vtl(CPU(cpu)), *val);
     return true;
 }
 
