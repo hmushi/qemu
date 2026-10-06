@@ -117,6 +117,10 @@ static void kvm_apic_enable_tpr_reporting(APICCommonState *s, bool enable)
         .enabled = enable
     };
 
+    /* not a plane vCPU ioctl; the kvmvapic ROM is not used by a plane > 0 */
+    if (CPU(s->cpu)->kvm_plane) {
+        return;
+    }
     kvm_vcpu_ioctl(CPU(s->cpu), KVM_TPR_ACCESS_REPORTING, &ctl);
 }
 
@@ -127,6 +131,9 @@ static void kvm_apic_vapic_base_update(APICCommonState *s)
     };
     int ret;
 
+    if (CPU(s->cpu)->kvm_plane) {
+        return;
+    }
     ret = kvm_vcpu_ioctl(CPU(s->cpu), KVM_SET_VAPIC_ADDR, &vapid_addr);
     if (ret < 0) {
         fprintf(stderr, "KVM: setting VAPIC address failed (%s)\n",

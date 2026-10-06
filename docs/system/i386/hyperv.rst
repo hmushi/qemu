@@ -242,6 +242,21 @@ Existing enlightenments
   registers ("XMM Fast Hypercall Input"). When the feature is in use, it allows
   for faster hypercalls processing as KVM can avoid reading guest's memory.
 
+``hv-xmm-output``
+  Hyper-V specification allows certain hypercalls to return their output in
+  XMM registers ("XMM Fast Hypercall Output").
+
+  Requires: ``hv-xmm-input``
+
+``hv-vsm``
+  Virtual Secure Mode (VSM): Virtual Trust Levels (VTL0 and VTL1) for the
+  Windows secure kernel, Credential Guard and HVCI. Each VTL above 0 runs on a
+  KVM plane created when the guest enables it. KVM planes require the split
+  irqchip, so the machine must be started with
+  ``-machine kernel-irqchip=split``; QEMU refuses to start otherwise.
+
+  Requires: ``hv-synic``, ``-machine kernel-irqchip=split``
+
 ``hv-tlbflush-ext``
   Allow for extended GVA ranges to be passed to Hyper-V TLB flush hypercalls
   (HvFlushVirtualAddressList/HvFlushVirtualAddressListEx).

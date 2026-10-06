@@ -1816,6 +1816,12 @@ static int hyperv_init_vcpu(X86CPU *cpu)
         }
     }
 
+    if (hyperv_feat_enabled(cpu, HYPERV_FEAT_VSM) && !kvm_irqchip_is_split()) {
+        error_report("hv-vsm needs the split irqchip "
+                     "(-machine kernel-irqchip=split): KVM planes require it");
+        return -ENOTSUP;
+    }
+
     if (hyperv_feat_enabled(cpu, HYPERV_FEAT_VSM) &&
         hyperv_vsm_init_vcpu(cpu)) {
         error_report("kvm: Failed to init VSM state on cpu %u",
@@ -4455,18 +4461,21 @@ static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
 
         /*
          * Hyper-V partition-wide MSRs: to avoid clearing them on cpu hot-add,
-         * only sync them to KVM on the first cpu on every VTL.
+         * only sync them to KVM from the first cpu. A plane > 0 vCPU of VP0
+         * is not it: its zero GUEST_OS_ID would disable the VM-wide
+         * hypercall page. REFERENCE_TSC is per plane with partition-wide
+         * content, so every plane's VP0 writes it.
          */
-        if (hv_plane_vcpu(hyperv_vp_index(current_cpu), 0) == first_cpu) {
+        if (hyperv_feat_enabled(cpu, HYPERV_FEAT_TIME) &&
+            hyperv_vp_index(current_cpu) == 0) {
+            kvm_msr_entry_add(cpu, HV_X64_MSR_REFERENCE_TSC, env->msr_hv_tsc);
+        }
+        if (current_cpu == first_cpu) {
             if (has_msr_hv_hypercall) {
                 kvm_msr_entry_add(cpu, HV_X64_MSR_GUEST_OS_ID,
                                   env->msr_hv_guest_os_id);
                 kvm_msr_entry_add(cpu, HV_X64_MSR_HYPERCALL,
                                   env->msr_hv_hypercall);
-            }
-            if (hyperv_feat_enabled(cpu, HYPERV_FEAT_TIME)) {
-                kvm_msr_entry_add(cpu, HV_X64_MSR_REFERENCE_TSC,
-                                  env->msr_hv_tsc);
             }
             if (hyperv_feat_enabled(cpu, HYPERV_FEAT_REENLIGHTENMENT)) {
                 kvm_msr_entry_add(cpu, HV_X64_MSR_REENLIGHTENMENT_CONTROL,
@@ -5022,7 +5031,8 @@ static int kvm_get_msrs(X86CPU *cpu)
         }
     }
 
-    if (has_msr_hv_hypercall) {
+    /* VM-wide; a plane > 0 vCPU is created while the guest runs */
+    if (has_msr_hv_hypercall && !CPU(cpu)->kvm_plane) {
         kvm_msr_entry_add(cpu, HV_X64_MSR_HYPERCALL, 0);
         kvm_msr_entry_add(cpu, HV_X64_MSR_GUEST_OS_ID, 0);
     }
