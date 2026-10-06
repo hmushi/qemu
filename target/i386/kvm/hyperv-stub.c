@@ -60,6 +60,9 @@ CPUState *hv_plane_vcpu(uint32_t vp_index, int vtl)
     return vtl == 0 ? qemu_get_cpu(vp_index) : NULL;
 }
 
+void hv_plane_reset(void)
+{
+}
 #endif
 
 int hyperv_vsm_init_vcpu(X86CPU *cpu)

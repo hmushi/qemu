@@ -105,7 +105,7 @@ int hv_plane_create(int vtl)
         return -EINVAL;
     }
     if (planes_created & BIT(vtl)) {
-        return -EEXIST;
+        return 0;                       /* kept across a system reset */
     }
     if (!host_has_tdp()) {
         error_report("hyperv-vsm: VTL%d needs EPT/NPT (two-dimensional "
@@ -136,9 +136,12 @@ CPUState *hv_plane_vcpu_create(uint32_t vp_index, int vtl)
     Object *obj;
     CPUState *cs;
 
-    if (!leader || !(planes_created & BIT(vtl)) ||
-        hv_plane_vcpu(vp_index, vtl)) {
+    if (!leader || !(planes_created & BIT(vtl))) {
         return NULL;
+    }
+    cs = hv_plane_vcpu(vp_index, vtl);
+    if (cs) {
+        return cs;                      /* kept across a system reset */
     }
 
     /*
@@ -185,6 +188,17 @@ int hv_plane_vcpu_reset(CPUState *cs)
 static void select_plane_work(CPUState *leader, run_on_cpu_data arg)
 {
     kvm_plane_select(arg.host_ptr);
+}
+
+void hv_plane_reset(void)
+{
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        if (cs->kvm_plane_next) {
+            run_on_cpu(cs, select_plane_work, RUN_ON_CPU_HOST_PTR(cs));
+        }
+    }
 }
 
 int hv_plane_vcpu_start(uint32_t vp_index, int start_vtl)

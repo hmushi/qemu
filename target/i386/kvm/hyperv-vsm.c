@@ -18,6 +18,7 @@
 #include "exec/target_page.h"
 #include "system/address-spaces.h"
 #include "system/cpus.h"
+#include "system/reset.h"
 #include "system/hw_accel.h"
 #include "system/memory.h"
 #include "hw/core/boards.h"
@@ -281,6 +282,64 @@ static void vp_vsm_register_types(void)
 
 type_init(vp_vsm_register_types)
 
+static int set_memory_attrs_range(uint8_t vtl, uint64_t start, uint64_t end,
+                                  uint64_t attrs);
+
+/*
+ * System reset with VSM enabled: the guest starts over in VTL0 with no VTL
+ * enabled. The KVM planes and plane vCPUs persist (the kernel cannot
+ * destroy them); the CPU reset handlers put the plane vCPUs in reset state
+ * and the plane layer makes every VP run plane 0 again. Here the per-VP and
+ * partition-wide VSM state goes back to its initial values and the lower
+ * VTLs' memory protections are lifted.
+ */
+static void hyperv_vsm_reset(void *opaque)
+{
+    CPUState *cs;
+    int vtl;
+
+    CPU_FOREACH(cs) {
+        VpVsmState *vpvsm = get_vp_vsm(cs);
+
+        if (!vpvsm) {
+            continue;
+        }
+        setup_hypercall_page(cs, 0);
+        setup_vp_assist(cs, 0);
+        if (vpvsm->intercept_route) {
+            hyperv_sint_route_unref(vpvsm->intercept_route);
+            vpvsm->intercept_route = NULL;
+        }
+        memset(vpvsm->vtl_config, 0, sizeof(vpvsm->vtl_config));
+        vpvsm->vp_status.as_uint64 = 0;
+        vpvsm->vp_status.enabled_vtl_set = BIT(0);
+        vpvsm->vp_status.active_vtl = active_vtl(cs);
+    }
+
+    for (vtl = 0; vtl < HV_NUM_VTLS; vtl++) {
+        GHashTableIter it;
+        gpointer gfn;
+
+        if (!hv_vsm.prots[vtl]) {
+            continue;
+        }
+        g_hash_table_iter_init(&it, hv_vsm.prots[vtl]);
+        while (g_hash_table_iter_next(&it, &gfn, NULL)) {
+            uint64_t g = GPOINTER_TO_UINT(gfn);
+
+            set_memory_attrs_range(vtl, g, g + 1, 0);
+        }
+        g_hash_table_destroy(hv_vsm.prots[vtl]);
+        hv_vsm.prots[vtl] = NULL;
+    }
+
+    hv_vsm.vtl_enabled_for_vps = BIT(0);
+    hv_vsm.partition_status.enabled_vtl_set = BIT(0);
+    memset(hv_vsm.partition_config, 0, sizeof(hv_vsm.partition_config));
+
+    hv_plane_reset();
+}
+
 /*
  * MSR filters are VM-wide (KVM_X86_SET_MSR_FILTER): install the VP assist
  * and hypercall page filters once, from VP0 of VTL0, and the EOI fixup once
@@ -303,6 +362,7 @@ int hyperv_vsm_init_vcpu(X86CPU *cpu)
                          "the kernel");
             return -1;
         }
+        qemu_register_reset(hyperv_vsm_reset, NULL);
         if (kvm_filter_msr(s, HV_X64_MSR_APIC_ASSIST_PAGE, NULL,
                            vp_assist_page_wrmsr) < 0 ||
             kvm_filter_msr(s, HV_X64_MSR_HYPERCALL, NULL,

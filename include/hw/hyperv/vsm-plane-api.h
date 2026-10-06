@@ -111,8 +111,9 @@ KVMState *hv_plane_kvm_state(CPUState *cs);
  * hv_plane_create: create the plane for @vtl (HvCallEnablePartitionVtl).
  *
  * Called once per VTL by hyperv_hcall_vtl_enable_partition_vtl() after the
- * TLFS checks pass, from the calling VP's thread. Pre: plane @vtl does not
- * exist. Post: plane fd kept by the implementation; memory, clock and
+ * TLFS checks pass, from the calling VP's thread. A plane left over from
+ * before a system reset is reused. Post: plane fd kept by the
+ * implementation; memory, clock and
  * irqchip are shared with plane 0 by construction. Maps to
  * KVM_CREATE_PLANE(@vtl) on the VM fd. Returns 0 or -errno; the handler
  * reports HV_STATUS_INVALID_PARAMETER on failure. Was kvm_init_companion_vm()
@@ -127,8 +128,9 @@ int hv_plane_create(int vtl);
  *
  * Called by hyperv_hcall_vtl_enable_vp_vtl() from the requesting VP's
  * thread, which may be another VP. Pre: hv_plane_create(@vtl) done, the
- * plane-0 CPUState of @vp_index exists, no CPUState for (@vp_index, @vtl)
- * yet. Post: a realized CPUState whose kvm fd is the plane vCPU, with its
+ * plane-0 CPUState of @vp_index exists. A CPUState for (@vp_index, @vtl)
+ * left over from before a system reset is returned as is (reset state).
+ * Post: a realized CPUState whose kvm fd is the plane vCPU, with its
  * own SynIC and VpVsm children (the caller adds them through
  * hyperv_vsm_init_vcpu() during cpu realize), LAPIC in reset state with
  * the sibling's APIC ID (requirement 3), parked until hv_plane_run_vtl()
@@ -261,6 +263,15 @@ int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run);
  * the switch (accel/kvm writes kvm_run->plane). No ioctl.
  */
 void hv_plane_pre_run(CPUState *cs, struct kvm_run *run);
+
+/*
+ * hv_plane_reset: system reset with VTLs enabled. Called by the VSM layer's
+ * reset handler with every vCPU paused. KVM planes and plane vCPUs persist
+ * (hv_plane_create()/hv_plane_vcpu_create() hand them out again when the
+ * guest re-enables the VTLs); the plane vCPUs' registers were reset by
+ * their own CPU reset. Post: every VP's thread runs plane 0 next.
+ */
+void hv_plane_reset(void);
 
 /*
  * hv_plane_translate: walk the page tables of plane vCPU @cs
