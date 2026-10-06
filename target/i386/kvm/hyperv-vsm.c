@@ -1680,150 +1680,6 @@ uint64_t hyperv_hcall_vtl_protection_mask(CPUState *cs,
     return (uint64_t)count << HV_HYPERCALL_REP_COMP_OFFSET;
 }
 
-static uint64_t get_sparse_vp_set(CPUState *cs, struct kvm_hyperv_exit *exit,
-                                  bool fast, uint16_t cnt, uint64_t *data,
-                                  int consumed_xmm_halves)
-{
-    uint64_t in_addr;
-    int i;
-
-    if (cnt > HV_MAX_SPARSE_VCPU_BANKS) {
-        return HV_STATUS_INVALID_HYPERCALL_INPUT;
-    }
-
-    if (fast) {
-        /* two banks per XMM register, minus the halves already used */
-        if (!hv_exit_has_xmm(exit) ||
-            cnt > 2 * HV_HYPERCALL_MAX_XMM_REGISTERS - consumed_xmm_halves) {
-            return HV_STATUS_INVALID_HYPERCALL_INPUT;
-        }
-        for (i = 0; i < cnt; i++) {
-            data[i] = hv_exit_xmm_get(exit, i + consumed_xmm_halves);
-        }
-        return HV_STATUS_SUCCESS;
-    }
-
-    in_addr = exit->u.hcall.params[0] +
-              offsetof(struct hv_send_ipi_ex, vp_set.bank_contents);
-    if (vsm_physmem_read(cs, in_addr, data, cnt * sizeof(*data)) != MEMTX_OK) {
-        return HV_STATUS_INVALID_HYPERCALL_INPUT;
-    }
-    return HV_STATUS_SUCCESS;
-}
-
-static bool vp_in_sparse_set(uint32_t vp_id, uint64_t valid_bank_mask,
-                             const uint64_t *sparse_banks)
-{
-    int valid_bit_nr = vp_id / HV_VCPUS_PER_SPARSE_BANK;
-    unsigned long sbank;
-
-    if (!(valid_bank_mask & BIT_ULL(valid_bit_nr))) {
-        return false;
-    }
-
-    /* the bank index is the number of valid bits below this one */
-    sbank = valid_bit_nr ?
-            ctpop64(valid_bank_mask & MAKE_64BIT_MASK(0, valid_bit_nr)) : 0;
-
-    return sparse_banks[sbank] & BIT_ULL(vp_id % HV_VCPUS_PER_SPARSE_BANK);
-}
-
-uint64_t hyperv_hcall_send_ipi(CPUState *cs, int code,
-                               struct kvm_hyperv_exit *exit)
-{
-    uint16_t var_cnt = (exit->u.hcall.input & HV_HYPERCALL_VARHEAD_MASK) >>
-                       HV_HYPERCALL_VARHEAD_OFFSET;
-    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
-    uint64_t sparse_banks[HV_MAX_SPARSE_VCPU_BANKS] = {};
-    uint64_t ingpa = exit->u.hcall.params[0];
-    struct hv_send_ipi_ex send_ipi_ex;
-    struct hv_send_ipi send_ipi;
-    union hv_input_vtl in_vtl;
-    uint64_t valid_bank_mask;
-    bool all_cpus = false;
-    CPUState *target_cs;
-    uint32_t vector;
-    uint16_t status;
-    int target_vtl;
-
-    if (code == HVCALL_SEND_IPI) {
-        if (fast) {
-            vector = (uint32_t)ingpa;
-            in_vtl.as_uint8 = (uint8_t)(ingpa >> 32);
-            sparse_banks[0] = exit->u.hcall.params[1];
-        } else {
-            if (vsm_physmem_read(cs, ingpa, &send_ipi,
-                                 sizeof(send_ipi)) != MEMTX_OK) {
-                return HV_STATUS_INVALID_HYPERCALL_INPUT;
-            }
-            vector = send_ipi.vector;
-            in_vtl.as_uint8 = send_ipi.in_vtl.as_uint8;
-            sparse_banks[0] = send_ipi.cpu_mask;
-        }
-        valid_bank_mask = BIT_ULL(0);
-    } else {
-        if (fast) {
-            if (!hv_exit_has_xmm(exit)) {
-                return HV_STATUS_INVALID_HYPERCALL_INPUT;
-            }
-            vector = (uint32_t)exit->u.hcall.params[0];
-            in_vtl.as_uint8 = (uint8_t)(exit->u.hcall.params[0] >> 32);
-            send_ipi_ex.vp_set.format = exit->u.hcall.params[1];
-            valid_bank_mask = hv_exit_xmm_get(exit, 0);
-        } else {
-            if (vsm_physmem_read(cs, ingpa, &send_ipi_ex,
-                                 sizeof(send_ipi_ex)) != MEMTX_OK) {
-                return HV_STATUS_INVALID_HYPERCALL_INPUT;
-            }
-            vector = send_ipi_ex.vector;
-            in_vtl.as_uint8 = send_ipi_ex.in_vtl.as_uint8;
-            valid_bank_mask = send_ipi_ex.vp_set.valid_bank_mask;
-        }
-
-        all_cpus = send_ipi_ex.vp_set.format == HV_GENERIC_SET_ALL;
-        if (!all_cpus) {
-            status = get_sparse_vp_set(cs, exit, fast, var_cnt, sparse_banks,
-                                       1);
-            if (status != HV_STATUS_SUCCESS) {
-                return status;
-            }
-        }
-    }
-
-    target_vtl = in_vtl.use_target_vtl ? in_vtl.target_vtl : active_vtl(cs);
-    trace_hyperv_vsm_hcall_send_ipi(hyperv_vp_index(cs), code, vector,
-                                    active_vtl(cs), target_vtl, all_cpus,
-                                    valid_bank_mask, sparse_banks[0]);
-
-    if (vector < HV_IPI_LOW_VECTOR || vector > HV_IPI_HIGH_VECTOR) {
-        return HV_STATUS_INVALID_HYPERCALL_INPUT;
-    }
-
-    CPU_FOREACH(target_cs) {
-        MSIMessage msg;
-
-        if (active_vtl(target_cs) != target_vtl) {
-            continue;
-        }
-        if (!all_cpus && !vp_in_sparse_set(hyperv_vp_index(target_cs),
-                                           valid_bank_mask, sparse_banks)) {
-            continue;
-        }
-
-        trace_hyperv_vsm_send_ipi_target(hyperv_vp_index(target_cs), target_vtl,
-                                         vector);
-        msg = (MSIMessage) {
-            .address = APIC_DEFAULT_ADDRESS |
-                       (target_cs->cc->get_arch_id(target_cs) <<
-                        MSI_ADDR_DEST_ID_SHIFT),
-            .data = vector,
-        };
-        hv_plane_send_msi(target_cs, msg);
-    }
-
-    return HV_STATUS_SUCCESS;
-}
-
 uint64_t hyperv_hcall_get_vp_index_from_apic_id(CPUState *cs,
                                                 struct kvm_hyperv_exit *exit)
 {
@@ -1928,10 +1784,18 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
     }
     vpvsm = get_vp_vsm(vcpu);
 
-    /* the target VP must be stopped in every lower VTL and not be the BSP */
+    /*
+     * The target VP must not run in any lower VTL and not be the BSP: its
+     * KVM MP state (fetched with the registers) is UNINITIALIZED or STOPPED.
+     */
     for (i = input.target_vtl - 1; i >= 0; i--) {
         vcpu = hv_plane_vcpu(input.vp_index, i);
-        if (!vcpu || !cpu_is_stopped(vcpu) || cpu_is_bsp(X86_CPU(vcpu))) {
+        if (!vcpu || cpu_is_bsp(X86_CPU(vcpu))) {
+            return HV_STATUS_INVALID_VP_STATE;
+        }
+        cpu_synchronize_state(vcpu);
+        if (!cpu_is_stopped(vcpu) &&
+            X86_CPU(vcpu)->env.mp_state != KVM_MP_STATE_UNINITIALIZED) {
             return HV_STATUS_INVALID_VP_STATE;
         }
     }
