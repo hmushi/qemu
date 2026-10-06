@@ -92,10 +92,16 @@ struct kvm_pit_config {
 
 #define KVM_PIT_SPEAKER_DUMMY     1
 
+struct kvm_hyperv_xmm_reg {
+	__u64 low;
+	__u64 high;
+};
+
 struct kvm_hyperv_exit {
 #define KVM_EXIT_HYPERV_SYNIC          1
 #define KVM_EXIT_HYPERV_HCALL          2
 #define KVM_EXIT_HYPERV_SYNDBG         3
+#define KVM_EXIT_HYPERV_HCALL_XMM      4
 	__u32 type;
 	__u32 pad1;
 	union {
@@ -110,6 +116,8 @@ struct kvm_hyperv_exit {
 			__u64 input;
 			__u64 result;
 			__u64 params[2];
+			/* KVM_EXIT_HYPERV_HCALL_XMM: XMM0..XMM5 of a fast call */
+			struct kvm_hyperv_xmm_reg xmm[6];
 		} hcall;
 		struct {
 			__u32 msr;
@@ -141,6 +149,20 @@ struct kvm_exit_snp_req_certs {
 	__u64 gpa;
 	__u64 npages;
 	__u64 ret;
+};
+
+struct kvm_plane_event_exit {
+#define KVM_PLANE_EVENT_CREATE_VCPU		1
+#define KVM_PLANE_EVENT_INTERRUPT		2
+#define KVM_PLANE_EVENT_LOWER_INTERRUPT	3
+	__u32 cause;
+	__u32 plane;
+	/*
+	 * KVM_PLANE_EVENT_INTERRUPT: higher planes in req_exit_planes with a
+	 * pending interrupt.  KVM_PLANE_EVENT_LOWER_INTERRUPT: lower planes in
+	 * req_exit_planes whose interrupt became pending since last reported.
+	 */
+	__u64 extra[8];
 };
 
 #define KVM_S390_GET_SKEYS_NONE   1
@@ -190,6 +212,7 @@ struct kvm_exit_snp_req_certs {
 #define KVM_EXIT_ARM_SEA          41
 #define KVM_EXIT_ARM_LDST64B      42
 #define KVM_EXIT_SNP_REQ_CERTS    43
+#define KVM_EXIT_PLANE_EVENT      44
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -218,7 +241,15 @@ struct kvm_run {
 	/* in */
 	__u8 request_interrupt_window;
 	__u8 HINT_UNSAFE_IN_KVM(immediate_exit);
-	__u8 padding1[6];
+
+	/*
+	 * KVM_CAP_PLANES_USERSPACE_SWITCH: plane to run (in/out) and planes
+	 * whose pending interrupt must exit with KVM_EXIT_PLANE_EVENT (in).
+	 */
+	__u8 plane;
+	__u8 padding1;
+	__u16 req_exit_planes;
+	__u16 padding2;
 
 	/* out */
 	__u32 exit_reason;
@@ -446,10 +477,15 @@ struct kvm_run {
 		} notify;
 		/* KVM_EXIT_MEMORY_FAULT */
 		struct {
+#define KVM_MEMORY_EXIT_FLAG_READ       (1ULL << 0)
+#define KVM_MEMORY_EXIT_FLAG_WRITE      (1ULL << 1)
+#define KVM_MEMORY_EXIT_FLAG_EXEC       (1ULL << 2)
 #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
+#define KVM_MEMORY_EXIT_FLAG_PLANE	(1ULL << 4)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
+			__u8 plane;
 		} memory_fault;
 		/* KVM_EXIT_TDX */
 		struct {
@@ -486,6 +522,8 @@ struct kvm_run {
 		} arm_sea;
 		/* KVM_EXIT_SNP_REQ_CERTS */
 		struct kvm_exit_snp_req_certs snp_req_certs;
+		/* KVM_EXIT_PLANE_EVENT */
+		struct kvm_plane_event_exit plane_event;
 		/* Fix the size of the union. */
 		char padding[256];
 	};
@@ -550,6 +588,37 @@ struct kvm_translation {
 	__u8  writeable;
 	__u8  usermode;
 	__u8  pad[5];
+};
+
+/* for KVM_TRANSLATE2 */
+struct kvm_translation2 {
+	/* in */
+	__u64 linear_address;
+#define KVM_TRANSLATE_FLAGS_SET_ACCESSED	(1 << 0)
+#define KVM_TRANSLATE_FLAGS_SET_DIRTY	(1 << 1)
+#define KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED	(1 << 2)
+	__u16 flags;
+#define KVM_TRANSLATE_ACCESS_WRITE	(1 << 0)
+#define KVM_TRANSLATE_ACCESS_USER	(1 << 1)
+#define KVM_TRANSLATE_ACCESS_EXEC	(1 << 2)
+#define KVM_TRANSLATE_ACCESS_ALL      \
+	(KVM_TRANSLATE_ACCESS_WRITE | \
+	KVM_TRANSLATE_ACCESS_USER |   \
+	KVM_TRANSLATE_ACCESS_EXEC)
+	__u16 access;
+	__u8  padding[4];
+
+	/* out */
+	__u64 physical_address;
+	__u8  valid;
+#define KVM_TRANSLATE_FAULT_NOT_PRESENT	1
+#define KVM_TRANSLATE_FAULT_PRIVILEGE_VIOLATION	2
+#define KVM_TRANSLATE_FAULT_RESERVED_BITS	3
+#define KVM_TRANSLATE_FAULT_INVALID_GVA	4
+#define KVM_TRANSLATE_FAULT_INVALID_GPA	5
+	__u16 error_code;
+	__u8  set_bits_succeeded;
+	__u8  padding2[4];
 };
 
 /* for KVM_INTERRUPT */
@@ -718,6 +787,11 @@ struct kvm_enable_cap {
 #define KVM_GET_SUPPORTED_CPUID   _IOWR(KVMIO, 0x05, struct kvm_cpuid2)
 #define KVM_GET_EMULATED_CPUID	  _IOWR(KVMIO, 0x09, struct kvm_cpuid2)
 #define KVM_GET_MSR_FEATURE_INDEX_LIST    _IOWR(KVMIO, 0x0a, struct kvm_msr_list)
+
+/*
+ * Maximum number of supported planes
+ */
+#define KVM_MAX_PLANES	16
 
 /*
  * Extension capability list.
@@ -987,6 +1061,13 @@ struct kvm_enable_cap {
 #define KVM_CAP_S390_VSIE_ESAMODE 248
 #define KVM_CAP_S390_HPAGE_2G 249
 #define KVM_CAP_PPC_COMPAT_CAPS 250
+#define KVM_CAP_ARM_PMU_V3_STRICT 251
+#define KVM_CAP_PLANES 252
+#define KVM_CAP_HYPERV_HCALL_FAULT_EXIT 253
+#define KVM_CAP_TRANSLATE2 254
+#define KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT 255
+#define KVM_CAP_PLANES_USERSPACE_SWITCH 256
+#define KVM_CAP_HYPERV_VSM 257
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
@@ -1014,6 +1095,7 @@ struct kvm_irq_routing_s390_adapter {
 struct kvm_irq_routing_hv_sint {
 	__u32 vcpu;
 	__u32 sint;
+	__u32 plane;
 };
 
 struct kvm_irq_routing_xen_evtchn {
@@ -1342,6 +1424,8 @@ struct kvm_s390_keyop {
 #define KVM_GET_DEVICE_ATTR	  _IOW(KVMIO,  0xe2, struct kvm_device_attr)
 #define KVM_HAS_DEVICE_ATTR	  _IOW(KVMIO,  0xe3, struct kvm_device_attr)
 
+#define KVM_CREATE_PLANE	  _IO(KVMIO, 0xe4)
+
 /*
  * ioctls for vcpu fds
  */
@@ -1352,6 +1436,7 @@ struct kvm_s390_keyop {
 #define KVM_SET_SREGS             _IOW(KVMIO,  0x84, struct kvm_sregs)
 #define KVM_TRANSLATE             _IOWR(KVMIO, 0x85, struct kvm_translation)
 #define KVM_INTERRUPT             _IOW(KVMIO,  0x86, struct kvm_interrupt)
+#define KVM_TRANSLATE2            _IOWR(KVMIO, 0x87, struct kvm_translation2)
 #define KVM_GET_MSRS              _IOWR(KVMIO, 0x88, struct kvm_msrs)
 #define KVM_SET_MSRS              _IOW(KVMIO,  0x89, struct kvm_msrs)
 #define KVM_SET_CPUID             _IOW(KVMIO,  0x8a, struct kvm_cpuid)
@@ -1637,7 +1722,25 @@ struct kvm_memory_attributes {
 	__u64 flags;
 };
 
+#define KVM_MEMORY_ATTRIBUTE_NR		       (1ULL << 0)
+#define KVM_MEMORY_ATTRIBUTE_NW		       (1ULL << 1)
+#define KVM_MEMORY_ATTRIBUTE_NX		       (1ULL << 2)
 #define KVM_MEMORY_ATTRIBUTE_PRIVATE           (1ULL << 3)
+
+/*
+ * Available with KVM_CAP_PLANES > 1.  Restricts one plane's view of guest
+ * memory; the attributes apply to that plane's page tables only.  Only the
+ * NR/NW/NX attributes are accepted.
+ */
+#define KVM_SET_PLANE_MEMORY_ATTRIBUTES	_IOW(KVMIO,  0xd6, struct kvm_plane_memory_attributes)
+
+struct kvm_plane_memory_attributes {
+	__u32 plane;
+	__u32 flags;
+	__u64 address;
+	__u64 size;
+	__u64 attributes;
+};
 
 #define KVM_CREATE_GUEST_MEMFD	_IOWR(KVMIO,  0xd4, struct kvm_create_guest_memfd)
 #define GUEST_MEMFD_FLAG_MMAP		(1ULL << 0)
@@ -1656,6 +1759,35 @@ struct kvm_pre_fault_memory {
 	__u64 size;
 	__u64 flags;
 	__u64 padding[5];
+};
+
+/* Available with KVM_CAP_HYPERV_TLBFLUSH */
+#define KVM_HYPERV_SET_TLB_FLUSH_INHIBIT \
+	_IOW(KVMIO,  0xd7, struct kvm_hyperv_tlb_flush_inhibit)
+
+/* Available with KVM_CAP_HYPERV_VSM */
+#define KVM_HYPERV_SET_AUTO_EOI \
+	_IOW(KVMIO,  0xd8, struct kvm_hyperv_auto_eoi)
+
+/* for KVM_HYPERV_SET_AUTO_EOI */
+struct kvm_hyperv_auto_eoi {
+	/* in */
+	__u16 flags;
+	__u8  vector;
+#define KVM_HYPERV_AUTO_EOI_CLEAR 0
+#define KVM_HYPERV_AUTO_EOI_SET 1
+	__u8  set;
+	__u8  reserved[4];
+};
+
+/* for KVM_HYPERV_SET_TLB_FLUSH_INHIBIT */
+struct kvm_hyperv_tlb_flush_inhibit {
+	/* in */
+	__u16 flags;
+#define KVM_HYPERV_UNINHIBIT_TLB_FLUSH 0
+#define KVM_HYPERV_INHIBIT_TLB_FLUSH 1
+	__u8  inhibit;
+	__u8  reserved[5];
 };
 
 #endif /* __LINUX_KVM_H */
