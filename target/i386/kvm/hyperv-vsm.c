@@ -297,6 +297,12 @@ int hyperv_vsm_init_vcpu(X86CPU *cpu)
     int vtl = active_vtl(cs);
 
     if (hyperv_vp_index(cs) == 0 && vtl == 0) {
+        /* the VSM hypercalls exit to userspace only with the cap on */
+        if (kvm_vm_enable_cap(s, KVM_CAP_HYPERV_VSM, 0, 0) < 0) {
+            error_report("hyperv-vsm: KVM_CAP_HYPERV_VSM is not supported by "
+                         "the kernel");
+            return -1;
+        }
         if (kvm_filter_msr(s, HV_X64_MSR_APIC_ASSIST_PAGE, NULL,
                            vp_assist_page_wrmsr) < 0 ||
             kvm_filter_msr(s, HV_X64_MSR_HYPERCALL, NULL,
@@ -1794,8 +1800,11 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
             return HV_STATUS_INVALID_VP_STATE;
         }
         cpu_synchronize_state(vcpu);
-        if (!cpu_is_stopped(vcpu) &&
-            X86_CPU(vcpu)->env.mp_state != KVM_MP_STATE_UNINITIALIZED) {
+        switch (X86_CPU(vcpu)->env.mp_state) {
+        case KVM_MP_STATE_UNINITIALIZED:
+        case KVM_MP_STATE_STOPPED:
+            break;
+        default:
             return HV_STATUS_INVALID_VP_STATE;
         }
     }

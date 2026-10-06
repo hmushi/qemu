@@ -113,10 +113,6 @@ int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
         int ret;
 
         switch (code) {
-        case HVCALL_SEND_IPI:
-        case HVCALL_SEND_IPI_EX:
-            exit->u.hcall.result = hyperv_hcall_send_ipi(CPU(cpu), code, exit);
-            break;
         case HVCALL_MODIFY_VTL_PROTECTION_MASK:
             exit->u.hcall.result =
                 hyperv_hcall_vtl_protection_mask(CPU(cpu), exit);

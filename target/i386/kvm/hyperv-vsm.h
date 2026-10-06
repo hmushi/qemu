@@ -29,8 +29,6 @@ uint64_t hyperv_hcall_vtl_protection_mask(CPUState *cs,
                                           struct kvm_hyperv_exit *exit);
 uint64_t hyperv_hcall_translate_virtual_address(CPUState *cs,
                                                 struct kvm_hyperv_exit *exit);
-uint64_t hyperv_hcall_send_ipi(CPUState *cs, int code,
-                               struct kvm_hyperv_exit *exit);
 uint64_t hyperv_hcall_get_vp_index_from_apic_id(CPUState *cs,
                                                 struct kvm_hyperv_exit *exit);
 uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
