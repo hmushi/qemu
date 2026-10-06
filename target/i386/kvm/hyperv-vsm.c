@@ -320,6 +320,12 @@ static void hyperv_vsm_zero_memory(void)
  */
 static void set_vina(CPUState *cs, uint64_t data);
 
+/* a plane vCPU is only ever loaded from its leader's thread */
+static void clear_vp_assist_work(CPUState *cs, run_on_cpu_data arg)
+{
+    kvm_put_hv_vp_assist(X86_CPU(cs), 0);
+}
+
 static void hyperv_vsm_reset(void *opaque)
 {
     CPUState *cs;
@@ -333,6 +339,8 @@ static void hyperv_vsm_reset(void *opaque)
         }
         setup_hypercall_page(cs, 0);
         setup_vp_assist(cs, 0);
+        /* kvm_put_msrs() skips this MSR under VSM: the filter path owns it */
+        run_on_cpu(cs, clear_vp_assist_work, RUN_ON_CPU_NULL);
         if (vpvsm->intercept_route) {
             hyperv_sint_route_unref(vpvsm->intercept_route);
             vpvsm->intercept_route = NULL;
