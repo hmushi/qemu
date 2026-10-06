@@ -118,7 +118,7 @@ static void kvm_apic_enable_tpr_reporting(APICCommonState *s, bool enable)
     };
 
     /* not a plane vCPU ioctl; the kvmvapic ROM is not used by a plane > 0 */
-    if (CPU(s->cpu)->kvm_plane) {
+    if (cpu_is_plane_sibling(CPU(s->cpu))) {
         return;
     }
     kvm_vcpu_ioctl(CPU(s->cpu), KVM_TPR_ACCESS_REPORTING, &ctl);
@@ -131,7 +131,7 @@ static void kvm_apic_vapic_base_update(APICCommonState *s)
     };
     int ret;
 
-    if (CPU(s->cpu)->kvm_plane) {
+    if (cpu_is_plane_sibling(CPU(s->cpu))) {
         return;
     }
     ret = kvm_vcpu_ioctl(CPU(s->cpu), KVM_SET_VAPIC_ADDR, &vapid_addr);

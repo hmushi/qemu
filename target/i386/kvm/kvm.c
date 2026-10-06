@@ -906,7 +906,7 @@ static int kvm_arch_set_tsc_khz(CPUState *cs)
     }
 
     /* the TSC is shared with the plane-0 vCPU; KVM_SET_TSC_KHZ is per vCPU */
-    if (cs->kvm_plane) {
+    if (cpu_is_plane_sibling(cs)) {
         return 0;
     }
 
@@ -2310,7 +2310,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
     int r;
     Error *local_err = NULL;
 
-    if (cs->kvm_plane) {
+    if (cpu_is_plane_sibling(cs)) {
         return kvm_arch_init_plane_vcpu(cs);
     }
 
@@ -4471,7 +4471,7 @@ static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
             hyperv_vp_index(CPU(cpu)) == 0) {
             kvm_msr_entry_add(cpu, HV_X64_MSR_REFERENCE_TSC, env->msr_hv_tsc);
         }
-        if (CPU(cpu) == first_cpu && !CPU(cpu)->kvm_plane) {
+        if (CPU(cpu) == first_cpu && !cpu_is_plane_sibling(CPU(cpu))) {
             if (has_msr_hv_hypercall) {
                 kvm_msr_entry_add(cpu, HV_X64_MSR_GUEST_OS_ID,
                                   env->msr_hv_guest_os_id);
@@ -5033,7 +5033,7 @@ static int kvm_get_msrs(X86CPU *cpu)
     }
 
     /* VM-wide; a plane > 0 vCPU is created while the guest runs */
-    if (has_msr_hv_hypercall && !CPU(cpu)->kvm_plane) {
+    if (has_msr_hv_hypercall && !cpu_is_plane_sibling(CPU(cpu))) {
         kvm_msr_entry_add(cpu, HV_X64_MSR_HYPERCALL, 0);
         kvm_msr_entry_add(cpu, HV_X64_MSR_GUEST_OS_ID, 0);
     }
@@ -6118,7 +6118,7 @@ void kvm_arch_pre_run(CPUState *cpu, struct kvm_run *run)
     }
 
     /* VTL switch bookkeeping and req_exit_planes */
-    if (cpu->kvm_plane || cpu->kvm_plane_next) {
+    if (cpu_is_plane_sibling(cpu) || cpu->kvm_plane_next) {
         hv_plane_pre_run(cpu, run);
     }
 }

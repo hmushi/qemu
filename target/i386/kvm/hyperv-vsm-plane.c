@@ -177,9 +177,6 @@ static void do_cpu_init_work(CPUState *cs, run_on_cpu_data arg)
 
 int hv_plane_vcpu_reset(CPUState *cs)
 {
-    if (!cs->kvm_plane) {
-        return -EINVAL;
-    }
     /* runs on the sibling's thread; cpu_synchronize_post_reset() follows */
     cpu_synchronize_state(cs);
     run_on_cpu(cs, do_cpu_init_work, RUN_ON_CPU_NULL);
@@ -330,7 +327,7 @@ int hv_plane_send_msi(CPUState *cs, MSIMessage msg)
         .data = le32_to_cpu(msg.data),
     };
 
-    if (!cs->kvm_plane) {
+    if (cs->kvm_plane == 0) {
         return kvm_irqchip_send_msi(kvm_state, msg);
     }
     /* KVM_SIGNAL_MSI on the plane fd delivers to that plane's LAPICs */
@@ -363,7 +360,7 @@ void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
     /* a higher VTL's pending interrupt ends this VTL's run (TLFS 15.3) */
     run->req_exit_planes = higher_planes(cs, cs->kvm_plane);
     /* a lower VTL's pending interrupt is notified by VINA (TLFS 15.2.3) */
-    if (cs->kvm_plane) {
+    if (cs->kvm_plane > 0) {
         run->req_exit_planes |= vina_lower_planes(cs, run);
     }
 }

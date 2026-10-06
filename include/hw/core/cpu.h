@@ -819,6 +819,16 @@ bool cpu_internal_is_big_endian(CPUState *cpu);
  */
 bool cpu_has_work(CPUState *cpu);
 
+/*
+ * A plane > 0 vCPU: an extra CPUState created for a higher VTL that borrows
+ * its leader's thread. @kvm_plane is the plane (VTL) number, so plane 0 is a
+ * valid plane and must not be tested as a boolean.
+ */
+static inline bool cpu_is_plane_sibling(CPUState *cpu)
+{
+    return cpu->kvm_plane_leader != NULL;
+}
+
 /**
  * cpu_list_add:
  * @cpu: The CPU to be added to the list of CPUs.
