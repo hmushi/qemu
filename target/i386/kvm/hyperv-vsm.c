@@ -43,6 +43,11 @@ static struct {
     union hv_register_vsm_partition_status partition_status;
     union hv_register_vsm_capabilities capabilities;
     union hv_register_vsm_partition_config partition_config[HV_NUM_VTLS];
+    /* HV_X64_MSR_HYPERCALL is partition-wide (TLFS 3.13): one per VTL */
+    struct {
+        uint64_t msr;
+        void *page;
+    } hypercall[HV_NUM_VTLS];
 } hv_vsm = {
     .vtl_enabled_for_vps = BIT(0),
     .partition_status = {
@@ -61,8 +66,6 @@ struct VpVsmState {
     union hv_register_vsm_vp_secure_vtl_config vtl_config[HV_NUM_VTLS];
     uint64_t msr_hv_vp_assist;
     void *vp_assist;
-    uint64_t msr_hv_hypercall;
-    void *hypercall_page;
     HvSintRoute *intercept_route;
     struct hyperv_message intercept_msg;
     /* HvRegisterVsmVina (TLFS 15.6.5) */
@@ -105,39 +108,43 @@ static MemTxResult vsm_physmem_read(CPUState *cs, hwaddr addr,
     return address_space_read(cs->as, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
 }
 
-/* Hypercall page: VMCALL/VMMCALL stub plus the VTL call/return entry stubs */
+/*
+ * Hypercall page: VMCALL/VMMCALL stub plus the VTL call/return entry stubs.
+ * Written by any VP of the VTL, in effect for all of them. A disable only
+ * drops the mapping: the guest may still be returning through the page.
+ */
 static void setup_hypercall_page(CPUState *cs, uint64_t data)
 {
     hwaddr gpa = data & HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_MASK;
     hwaddr len = 1 << HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_SHIFT;
     bool enable = !!(data & HV_X64_MSR_HYPERCALL_ENABLE);
-    VpVsmState *vpvsm = get_vp_vsm(cs);
+    int vtl = active_vtl(cs);
     uint32_t ebx = 0, ecx = 0, edx = 0;
     char vendor[CPUID_VENDOR_SZ + 1];
     uint8_t insn[0x30] = {};
     int i = 0;
 
-    trace_hyperv_vsm_setup_hypercall_page(hyperv_vp_index(cs), active_vtl(cs),
-                                          enable, gpa);
-    if (!vpvsm) {
+    trace_hyperv_vsm_setup_hypercall_page(hyperv_vp_index(cs), vtl, enable,
+                                          gpa);
+    if (!get_vp_vsm(cs)) {
         return;
     }
 
-    vpvsm->msr_hv_hypercall = data;
+    hv_vsm.hypercall[vtl].msr = data;
 
-    if (vpvsm->hypercall_page) {
-        memset(vpvsm->hypercall_page, 0, len);
-        address_space_unmap(cs->as, vpvsm->hypercall_page, len, true, len);
-        vpvsm->hypercall_page = NULL;
+    if (hv_vsm.hypercall[vtl].page) {
+        address_space_unmap(cs->as, hv_vsm.hypercall[vtl].page, len, true,
+                            len);
+        hv_vsm.hypercall[vtl].page = NULL;
     }
 
     if (!enable) {
         return;
     }
 
-    vpvsm->hypercall_page = address_space_map(cs->as, gpa, &len, true,
-                                              MEMTXATTRS_UNSPECIFIED);
-    if (!vpvsm->hypercall_page) {
+    hv_vsm.hypercall[vtl].page = address_space_map(cs->as, gpa, &len, true,
+                                                   MEMTXATTRS_UNSPECIFIED);
+    if (!hv_vsm.hypercall[vtl].page) {
         error_report("hyperv-vsm: cannot map hypercall page at 0x%" HWADDR_PRIx,
                      gpa);
         return;
@@ -178,7 +185,7 @@ static void setup_hypercall_page(CPUState *cs, uint64_t data)
     insn[i++] = 0xeb;
     insn[i++] = 0xd6;
 
-    memcpy(vpvsm->hypercall_page, insn, i);
+    memcpy(hv_vsm.hypercall[vtl].page, insn, i);
 }
 
 static bool hypercall_page_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
@@ -198,7 +205,7 @@ static bool hypercall_page_rdmsr(X86CPU *cpu, uint32_t msr, uint64_t *val)
         return false;
     }
 
-    *val = get_vp_vsm(CPU(cpu))->msr_hv_hypercall;
+    *val = hv_vsm.hypercall[active_vtl(CPU(cpu))].msr;
     return true;
 }
 
@@ -1451,7 +1458,7 @@ static bool gpa_is_overlay(CPUState *cs, uint64_t gpa)
 {
     VpVsmState *vpvsm = get_vp_vsm(cs);
 
-    uint64_t hcall = vpvsm->msr_hv_hypercall &
+    uint64_t hcall = hv_vsm.hypercall[active_vtl(cs)].msr &
                      HV_X64_MSR_HYPERCALL_PAGE_ADDRESS_MASK;
     uint64_t assist = vpvsm->msr_hv_vp_assist &
                       HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_MASK;
