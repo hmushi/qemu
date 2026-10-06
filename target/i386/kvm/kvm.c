@@ -4225,6 +4225,42 @@ static void kvm_init_msrs(X86CPU *cpu)
     assert(kvm_buf_set_msrs(cpu) == 0);
 }
 
+/* MTRRs: reset-level MSRs, also VTL-shared state (kvm_put_hv_shared_msrs) */
+static void kvm_msr_entry_add_mtrr(X86CPU *cpu)
+{
+    CPUX86State *env = &cpu->env;
+    int i;
+
+    if (env->features[FEAT_1_EDX] & CPUID_MTRR) {
+        uint64_t phys_mask = MAKE_64BIT_MASK(0, cpu->phys_bits);
+
+        kvm_msr_entry_add(cpu, MSR_MTRRdefType, env->mtrr_deftype);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix64K_00000, env->mtrr_fixed[0]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix16K_80000, env->mtrr_fixed[1]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix16K_A0000, env->mtrr_fixed[2]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_C0000, env->mtrr_fixed[3]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_C8000, env->mtrr_fixed[4]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_D0000, env->mtrr_fixed[5]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_D8000, env->mtrr_fixed[6]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_E0000, env->mtrr_fixed[7]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_E8000, env->mtrr_fixed[8]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_F0000, env->mtrr_fixed[9]);
+        kvm_msr_entry_add(cpu, MSR_MTRRfix4K_F8000, env->mtrr_fixed[10]);
+        for (i = 0; i < MSR_MTRRcap_VCNT; i++) {
+            /*
+             * The CPU GPs if we write to a bit above the physical limit of
+             * the host CPU (and KVM emulates that)
+             */
+            uint64_t mask = env->mtrr_var[i].mask;
+            mask &= phys_mask;
+
+            kvm_msr_entry_add(cpu, MSR_MTRRphysBase(i),
+                              env->mtrr_var[i].base);
+            kvm_msr_entry_add(cpu, MSR_MTRRphysMask(i), mask);
+        }
+    }
+}
+
 static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
 {
     CPUX86State *env = &cpu->env;
@@ -4498,33 +4534,7 @@ static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
                                 env->msr_hv_stimer_count[j]);
             }
         }
-        if (env->features[FEAT_1_EDX] & CPUID_MTRR) {
-            uint64_t phys_mask = MAKE_64BIT_MASK(0, cpu->phys_bits);
-
-            kvm_msr_entry_add(cpu, MSR_MTRRdefType, env->mtrr_deftype);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix64K_00000, env->mtrr_fixed[0]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix16K_80000, env->mtrr_fixed[1]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix16K_A0000, env->mtrr_fixed[2]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_C0000, env->mtrr_fixed[3]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_C8000, env->mtrr_fixed[4]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_D0000, env->mtrr_fixed[5]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_D8000, env->mtrr_fixed[6]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_E0000, env->mtrr_fixed[7]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_E8000, env->mtrr_fixed[8]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_F0000, env->mtrr_fixed[9]);
-            kvm_msr_entry_add(cpu, MSR_MTRRfix4K_F8000, env->mtrr_fixed[10]);
-            for (i = 0; i < MSR_MTRRcap_VCNT; i++) {
-                /* The CPU GPs if we write to a bit above the physical limit of
-                 * the host CPU (and KVM emulates that)
-                 */
-                uint64_t mask = env->mtrr_var[i].mask;
-                mask &= phys_mask;
-
-                kvm_msr_entry_add(cpu, MSR_MTRRphysBase(i),
-                                  env->mtrr_var[i].base);
-                kvm_msr_entry_add(cpu, MSR_MTRRphysMask(i), mask);
-            }
-        }
+        kvm_msr_entry_add_mtrr(cpu);
         if (env->features[FEAT_7_0_EBX] & CPUID_7_0_EBX_INTEL_PT) {
             int addr_num = kvm_arch_get_supported_cpuid(kvm_state,
                                                     0x14, 1, R_EAX) & 0x7;
@@ -4629,6 +4639,30 @@ static int kvm_put_msrs(X86CPU *cpu, KvmPutState level)
         }
     }
 
+    return kvm_buf_set_msrs(cpu);
+}
+
+/*
+ * The TLFS VTL-shared MSRs (MTRRs, MCG, VP runtime): written when the
+ * Hyper-V VSM layer moves the shared state into the plane vCPU that runs
+ * next. Reset-level MSRs otherwise, so the runtime put skips them.
+ */
+int kvm_put_hv_shared_msrs(X86CPU *cpu)
+{
+    CPUX86State *env = &cpu->env;
+
+    kvm_msr_buf_reset(cpu);
+    kvm_msr_entry_add_mtrr(cpu);
+    if (env->mcg_cap) {
+        kvm_msr_entry_add(cpu, MSR_MCG_STATUS, env->mcg_status);
+        kvm_msr_entry_add(cpu, MSR_MCG_CTL, env->mcg_ctl);
+    }
+    if (hyperv_feat_enabled(cpu, HYPERV_FEAT_RUNTIME)) {
+        kvm_msr_entry_add(cpu, HV_X64_MSR_VP_RUNTIME, env->msr_hv_runtime);
+    }
+    if (!cpu->kvm_msr_buf->nmsrs) {
+        return 0;
+    }
     return kvm_buf_set_msrs(cpu);
 }
 
@@ -6677,6 +6711,15 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         break;
     case KVM_EXIT_MEMORY_FAULT:
         /* RWX fault on a VTL-protected page (kvm-all.c keeps PRIVATE) */
+        if (!(run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE) ||
+            run->memory_fault.plane != cs->kvm_plane) {
+            error_report("KVM_EXIT_MEMORY_FAULT: access fault outside the "
+                         "plane attributes (flags 0x%" PRIx64 ", plane %u on "
+                         "plane %d)", (uint64_t)run->memory_fault.flags,
+                         run->memory_fault.plane, cs->kvm_plane);
+            ret = -1;
+            break;
+        }
         ret = kvm_hv_handle_fault(cs, run->memory_fault.gpa,
                                   run->memory_fault.size,
                                   run->memory_fault.flags);

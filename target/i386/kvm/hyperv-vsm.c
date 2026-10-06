@@ -23,8 +23,6 @@
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/i386/apic_internal.h"
-#include "hw/i386/apic-msidef.h"
-#include "hw/pci/msi.h"
 #include "hw/hyperv/hyperv.h"
 #include "cpu.h"
 #include "kvm_i386.h"
@@ -1820,7 +1818,7 @@ uint64_t hyperv_hcall_send_ipi(CPUState *cs, int code,
                         MSI_ADDR_DEST_ID_SHIFT),
             .data = vector,
         };
-        kvm_irqchip_send_msi(hv_plane_kvm_state(target_cs), msg);
+        hv_plane_send_msi(target_cs, msg);
     }
 
     return HV_STATUS_SUCCESS;

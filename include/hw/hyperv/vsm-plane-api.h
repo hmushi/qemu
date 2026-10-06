@@ -16,21 +16,19 @@
  * TLFS-shared register state between the siblings and runs the target plane
  * on the same host thread; ModifyVtlProtectionMask is memory attributes
  * (NR/NW/NX) on the lower VTL's plane; a VTL0 fault on VTL1-protected memory
- * is a KVM_EXIT_MEMORY_FAULT with the RWX flag and insn_len; a VTL1 interrupt
+ * is a KVM_EXIT_MEMORY_FAULT with the RWX and PLANE flags; a VTL1 interrupt
  * while VTL0 runs is a plane event that ends VTL0's KVM_RUN. KVM names below
  * are the P2/P3 ones from vsm-kvm-abi-stub.h.
  *
- * The switch UAPI is not settled (PROPOSED, D8): either KVM_RUN on the
- * plane-0 fd with kvm_run->plane and req_exit_planes, or KVM_RUN on the
- * plane vCPU fd itself. hv_plane_run_vtl() and hv_plane_vtl_event() are the
- * only two functions that depend on it and are written so either form
- * implements them.
+ * The switch UAPI (D8): KVM_RUN on the plane-0 fd with kvm_run->plane
+ * selecting the plane and req_exit_planes the planes whose pending
+ * interrupt ends the run (KVM_CAP_PLANES_USERSPACE_SWITCH).
  *
  * Requirements the implementation must meet (from the kvm-unit-tests
  * baseline, worker B, B4/B5):
  *  1. CPU properties: hv-vsm (CPUID 0x40000003 EBX bits 16, 17, 21),
  *     hv-xmm-input (EDX bit 4), hv-xmm-output (EDX bit 15, depends on
- *     hv-xmm-input and KVM_CAP_HYPERV_XMM_EXIT). No machine option; VTL1
+ *     hv-xmm-input; KVM_CAP_HYPERV_VSM on the VM). No machine option; VTL1
  *     exists only after the guest's EnablePartitionVtl.
  *  2. Shared versus private VP state (TLFS 15.3.1): every switch moves the
  *     shared state between the siblings through hv_plane_export_shared_state()
@@ -50,7 +48,7 @@
  *     (hv_plane_set_tlb_flush_inhibit()).
  *  6. The GPA intercept message is built from the plane-0 vCPU's post-fault
  *     state (RFLAGS.RF set) plus instruction bytes read at RIP; it needs the
- *     RWX flags and insn_len from the exit.
+ *     RWX flags from the exit; the instruction length is decoded in QEMU.
  *  7. The hypercall page is per VTL, installed through the HV_X64_MSR_HYPERCALL
  *     filter, with the VTL call and return prologues at the offsets that
  *     HvRegisterVsmCodePageOffsets (0x000D0002) reports.
@@ -96,18 +94,16 @@ int hv_plane_active_vtl(CPUState *cs);
 CPUState *hv_plane_vcpu(uint32_t vp_index, int vtl);
 
 /*
- * hv_plane_kvm_state: the KVMState through which interrupt routing and MSI
- * delivery toward @cs's plane go.
+ * hv_plane_kvm_state: the KVMState through which interrupt routing toward
+ * @cs's plane goes.
  *
  * Called by hyperv_sint_route_new()/unref() for KVM_SET_GSI_ROUTING and the
- * irqfd (KVM_IRQ_ROUTING_HV_SINT must target the plane vCPU), by the
- * cross-VTL IPI for KVM_SIGNAL_MSI, and by hyperv_vsm_init_vcpu() for
- * KVM_X86_SET_MSR_FILTER. Was cs->kvm_state (one KVMState per companion
- * VM). Under planes there is one KVMState; the implementation must make the
- * routing and MSI calls land on the plane fd (planes keep one GSI table per
- * plane level and accept KVM_SET_GSI_ROUTING / KVM_SIGNAL_MSI on the plane
- * fd). KVM_X86_SET_MSR_FILTER is a VM ioctl shared by all planes; the
- * handler dispatches on the faulting vCPU's plane.
+ * irqfd, and by hyperv_vsm_init_vcpu() for KVM_X86_SET_MSR_FILTER. Was
+ * cs->kvm_state (one KVMState per companion VM). Under planes there is one
+ * KVMState and one GSI routing table on the VM fd; a SINT route entry names
+ * its plane (kvm_irq_routing_hv_sint.plane), so this returns kvm_state.
+ * KVM_X86_SET_MSR_FILTER is a VM ioctl shared by all planes; the handler
+ * dispatches on the faulting vCPU's plane.
  */
 KVMState *hv_plane_kvm_state(CPUState *cs);
 
@@ -179,9 +175,9 @@ int hv_plane_vcpu_start(uint32_t vp_index, int start_vtl);
  * @attrs is a mask of KVM_MEMORY_ATTRIBUTE_NR / NW / NX (Paolo's 2026-07
  * names, vsm-kvm-abi-stub.h); 0 restores full access. Post: a plane-@vtl
  * access violating @attrs produces a KVM_EXIT_MEMORY_FAULT with the RWX
- * flag and insn_len on the faulting plane-@vtl vCPU, which kvm.c hands to
- * kvm_hv_handle_fault(). Maps to KVM_SET_MEMORY_ATTRIBUTES on plane @vtl's
- * fd (P2: the attributes become per plane). Returns 0 or -errno. Was
+ * and PLANE flags on the faulting plane-@vtl vCPU, which kvm.c hands to
+ * kvm_hv_handle_fault(). Maps to KVM_SET_PLANE_MEMORY_ATTRIBUTES on the VM
+ * fd for plane @vtl. Returns 0 or -errno. Was
  * KVM_SET_MEMORY_ATTRIBUTES with NR/NW/NX on the companion VM fd of @vtl.
  */
 int hv_plane_set_memory_attrs(int vtl, hwaddr addr, hwaddr size,
@@ -237,9 +233,8 @@ typedef enum HvPlaneSwitchReason {
  * state export/import and writes the VP assist page vtl_control; the return
  * value is what kvm_arch_handle_exit() returns (EXCP_HALTED or
  * EXCP_INTERRUPT: leave the run loop for this plane) or -errno.
- * Implementation forms (D8): KVM_RUN on the plane-0 fd with
- * kvm_run->plane = @vtl and req_exit_planes = planes above @vtl; or KVM_RUN
- * on the plane vCPU fd of @vtl. Both on the VP's one host thread.
+ * Implementation (D8): KVM_RUN on the plane-0 fd with kvm_run->plane = @vtl
+ * and req_exit_planes = planes above @vtl, on the VP's one host thread.
  */
 int hv_plane_run_vtl(CPUState *cs, int vtl, HvPlaneSwitchReason reason);
 
@@ -250,10 +245,11 @@ int hv_plane_run_vtl(CPUState *cs, int vtl, HvPlaneSwitchReason reason);
  *
  * Called by kvm.c from the KVM exit path of the vCPU that reported it:
  * KVM_EXIT_PLANE_EVENT cause INTERRUPT on the running plane's KVM_RUN, @cs
- * the running (lower) plane, the pending plane in run->plane_event.plane
- * (both D8 forms). The implementation calls hv_plane_run_vtl(@cs, that
- * plane, HV_PLANE_SWITCH_INTERRUPT), because a higher VTL's interrupt
- * preempts a lower VTL (TLFS 15.3) and a lower VTL's interrupt waits.
+ * the running (lower) plane, the pending planes in run->plane_event.extra[0]
+ * (a req_exit_planes bitmap). The implementation calls
+ * hv_plane_run_vtl(@cs, highest such plane, HV_PLANE_SWITCH_INTERRUPT),
+ * because a higher VTL's interrupt preempts a lower VTL (TLFS 15.3) and a
+ * lower VTL's interrupt waits.
  * Returns what kvm_arch_handle_exit() returns.
  */
 int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run);
@@ -261,8 +257,8 @@ int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run);
 /*
  * hv_plane_pre_run: called by kvm_arch_pre_run() right before KVM_RUN on a
  * CPUState that has planes (a leader with plane vCPUs, or a plane vCPU).
- * Writes the run form 2 kvm_run fields (plane to run, req_exit_planes) and
- * does any per-entry bookkeeping of the switch. No ioctl.
+ * Writes kvm_run->req_exit_planes and does the per-entry bookkeeping of
+ * the switch (accel/kvm writes kvm_run->plane). No ioctl.
  */
 void hv_plane_pre_run(CPUState *cs, struct kvm_run *run);
 

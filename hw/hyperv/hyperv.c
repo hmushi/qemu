@@ -382,7 +382,8 @@ int hyperv_set_event_flag(HvSintRoute *sint_route, unsigned eventno)
     return ret;
 }
 
-static int kvm_irqchip_add_hv_sint_route(KVMState *s, uint32_t vcpu, uint32_t sint)
+static int kvm_irqchip_add_hv_sint_route(KVMState *s, uint32_t vcpu,
+                                         uint32_t sint, int vtl)
 {
     struct kvm_irq_routing_entry kroute = {};
     int virq;
@@ -400,6 +401,7 @@ static int kvm_irqchip_add_hv_sint_route(KVMState *s, uint32_t vcpu, uint32_t si
     kroute.flags = 0;
     kroute.u.hv_sint.vcpu = vcpu;
     kroute.u.hv_sint.sint = sint;
+    kroute.u.hv_sint.plane = vtl;       /* the SynIC of that plane's vCPU */
 
     kvm_add_routing_entry(s, &kroute);
     kvm_irqchip_commit_routes(s);
@@ -464,8 +466,9 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint
         goto cleanup_err_sint;
     }
 
-    /* the route targets the vCPU of @vtl, through that plane's KVMState */
-    gsi = kvm_irqchip_add_hv_sint_route(hv_plane_kvm_state(cs), vp_index, sint);
+    /* one routing table for all planes; the entry names the plane */
+    gsi = kvm_irqchip_add_hv_sint_route(hv_plane_kvm_state(cs), vp_index, sint,
+                                        vtl);
     if (gsi < 0) {
         goto cleanup_err_sint_notifier;
     }
