@@ -153,19 +153,6 @@ int hv_plane_create(int vtl);
 CPUState *hv_plane_vcpu_create(uint32_t vp_index, int vtl);
 
 /*
- * hv_plane_vcpu_reset: put the plane vCPU @cs through INIT so a new VP
- * context can be loaded (HvCallStartVirtualProcessor).
- *
- * Called by hyperv_hcall_start_virtual_processor() with the BQL held (@cs
- * runs on another thread), @cs stopped. Post: @cs's architectural state is
- * the INIT state, KVM told.
- * Maps to the QEMU reset path on the plane CPUState (do_cpu_init), which
- * ends in KVM_SET_REGS/SREGS/MP_STATE on the plane vCPU fd. Returns 0 or
- * -errno.
- */
-int hv_plane_vcpu_reset(CPUState *cs);
-
-/*
  * hv_plane_vcpu_start: let VP @vp_index run, in its highest enabled VTL
  * (HvCallStartVirtualProcessor, after the context load).
  *

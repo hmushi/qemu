@@ -2084,14 +2084,24 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
         goto out;
     }
 
-    if (hv_plane_vcpu_reset(vcpu)) {
-        status = HV_STATUS_INVALID_VP_STATE;
-        goto out;
-    }
-
     /* the context describes a 64-bit VP; EFER.LMA follows from LME + PG */
     input.vp_context.efer |= MSR_EFER_LMA;
-    /* a VTL0 VP keeps the APIC state of the INIT above, as after a SIPI */
+    /*
+     * The context this hypercall carries is registers only, so load that and
+     * touch no other per-VP state. An INIT here would clear state the caller
+     * never named and does not restore: the LAPIC, which apic_init_reset()
+     * leaves with SPIV clear and every LVT masked, and the SynIC control,
+     * message and event pages and interrupt source entries, which sit
+     * outside the INIT-preserved window of CPUX86State and so would reach
+     * KVM as zero through the synchronise below. Whatever the firmware or
+     * the guest left in them then stands, which is correct for a VP being
+     * restarted and identical to a reset for one started the first time,
+     * since that one holds its creation reset state. HvCallEnableVpVtl loads
+     * its context the same way.
+     *
+     * SPIV is forced on for a VTL>0 VP, whose secure kernel expects an
+     * enabled APIC; a VTL0 VP enables its own, as after a SIPI.
+     */
     load_vp_context(vcpu, &input.vp_context, input.target_vtl > 0);
     cpu_synchronize_post_reset(vcpu);
 

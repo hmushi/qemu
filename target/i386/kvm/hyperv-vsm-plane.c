@@ -170,19 +170,6 @@ CPUState *hv_plane_vcpu_create(uint32_t vp_index, int vtl)
     return cs;
 }
 
-static void do_cpu_init_work(CPUState *cs, run_on_cpu_data arg)
-{
-    do_cpu_init(X86_CPU(cs));
-}
-
-int hv_plane_vcpu_reset(CPUState *cs)
-{
-    /* runs on the sibling's thread; cpu_synchronize_post_reset() follows */
-    cpu_synchronize_state(cs);
-    run_on_cpu(cs, do_cpu_init_work, RUN_ON_CPU_NULL);
-    return 0;
-}
-
 static void select_plane_work(CPUState *leader, run_on_cpu_data arg)
 {
     kvm_plane_select(arg.host_ptr);
