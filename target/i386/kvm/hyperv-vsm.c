@@ -2054,10 +2054,12 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
     vpvsm = get_vp_vsm(vcpu);
 
     /*
-     * The target VP must not run in any lower VTL and not be the BSP: its
-     * KVM MP state (fetched with the registers) is UNINITIALIZED or STOPPED.
+     * The VP must not be the BSP and must not be running: its KVM MP state
+     * (fetched with the registers) is UNINITIALIZED or STOPPED. Checked for
+     * every VTL below the target, and for VTL0 itself when that is the
+     * target, which is how Windows starts an application processor.
      */
-    for (i = input.target_vtl - 1; i >= 0; i--) {
+    for (i = MAX(input.target_vtl, 1) - 1; i >= 0; i--) {
         vcpu = hv_plane_vcpu(input.vp_index, i);
         if (!vcpu || cpu_is_bsp(X86_CPU(vcpu))) {
             return HV_STATUS_INVALID_VP_STATE;
@@ -2090,7 +2092,8 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
 
     /* the context describes a 64-bit VP; EFER.LMA follows from LME + PG */
     input.vp_context.efer |= MSR_EFER_LMA;
-    load_vp_context(vcpu, &input.vp_context, true);
+    /* a VTL0 VP keeps the APIC state of the INIT above, as after a SIPI */
+    load_vp_context(vcpu, &input.vp_context, input.target_vtl > 0);
 
     bql_lock();
     cpu_synchronize_post_reset(vcpu);
