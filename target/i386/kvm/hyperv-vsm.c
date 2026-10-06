@@ -260,15 +260,13 @@ static void setup_vp_assist(CPUState *cs, uint64_t data)
         return;
     }
 
+    /* KVM clears apic_assist on the MSR write; the rest is the guest's */
     vpvsm->vp_assist = address_space_map(cs->as, gpa, &len, true,
                                          MEMTXATTRS_UNSPECIFIED);
     if (!vpvsm->vp_assist) {
         error_report("hyperv-vsm: cannot map VP assist page at 0x%" HWADDR_PRIx,
                      gpa);
-        return;
     }
-
-    memset(vpvsm->vp_assist, 0, sizeof(struct hv_vp_assist_page));
 }
 
 static bool vp_assist_page_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
