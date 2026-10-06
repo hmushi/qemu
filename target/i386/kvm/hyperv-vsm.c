@@ -191,6 +191,17 @@ static bool hypercall_page_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
     return true;
 }
 
+/* the write never reaches KVM, so the read is served from the VTL's copy */
+static bool hypercall_page_rdmsr(X86CPU *cpu, uint32_t msr, uint64_t *val)
+{
+    if (msr != HV_X64_MSR_HYPERCALL) {
+        return false;
+    }
+
+    *val = get_vp_vsm(CPU(cpu))->msr_hv_hypercall;
+    return true;
+}
+
 /*
  * The VTL1 secure kernel leaves reserved high bits set in HV_X64_MSR_EOI;
  * clear them before KVM sees the write. VTL0 writes pass through unchanged.
@@ -261,6 +272,16 @@ static bool vp_assist_page_wrmsr(X86CPU *cpu, uint32_t msr, uint64_t val)
 
     setup_vp_assist(CPU(cpu), val);
     kvm_put_hv_vp_assist(cpu, val);
+    return true;
+}
+
+static bool vp_assist_page_rdmsr(X86CPU *cpu, uint32_t msr, uint64_t *val)
+{
+    if (msr != HV_X64_MSR_APIC_ASSIST_PAGE) {
+        return false;
+    }
+
+    *val = get_vp_vsm(CPU(cpu))->msr_hv_vp_assist;
     return true;
 }
 
@@ -408,10 +429,10 @@ int hyperv_vsm_init_vcpu(X86CPU *cpu)
             return -1;
         }
         qemu_register_reset(hyperv_vsm_reset, NULL);
-        if (kvm_filter_msr(s, HV_X64_MSR_APIC_ASSIST_PAGE, NULL,
-                           vp_assist_page_wrmsr) < 0 ||
-            kvm_filter_msr(s, HV_X64_MSR_HYPERCALL, NULL,
-                           hypercall_page_wrmsr) < 0) {
+        if (kvm_filter_msr(s, HV_X64_MSR_APIC_ASSIST_PAGE,
+                           vp_assist_page_rdmsr, vp_assist_page_wrmsr) < 0 ||
+            kvm_filter_msr(s, HV_X64_MSR_HYPERCALL,
+                           hypercall_page_rdmsr, hypercall_page_wrmsr) < 0) {
             error_report("hyperv-vsm: cannot install VSM MSR filters");
             return -1;
         }
