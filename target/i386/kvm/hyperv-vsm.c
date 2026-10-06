@@ -124,11 +124,11 @@ static void setup_hypercall_page(CPUState *cs, uint64_t data)
     uint8_t insn[0x30] = {};
     int i = 0;
 
-    trace_hyperv_vsm_setup_hypercall_page(hyperv_vp_index(cs), vtl, enable,
-                                          gpa);
     if (!get_vp_vsm(cs)) {
         return;
     }
+    trace_hyperv_vsm_setup_hypercall_page(hyperv_vp_index(cs), vtl, enable,
+                                          gpa);
 
     hv_vsm.hypercall[vtl].msr = data;
 
