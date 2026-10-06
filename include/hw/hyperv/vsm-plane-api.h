@@ -6,11 +6,8 @@
  * plus the per-VTL SynIC routing in hw/hyperv/hyperv.c) and the KVM planes
  * plumbing that runs one plane per VTL. The VSM layer calls KVM only through
  * these functions. The implementation lives in
- * target/i386/kvm/hyperv-vsm-plane.c; today it is a set of stubs that fail
- * with -ENOSYS plus Nicolas Saenz Julienne's two-thread VTL switch kept
- * behind hv_plane_run_vtl(). Filling that file in against the P2 kernel UAPI
- * is the P4 class-B work; nothing outside that file and this header should
- * need to change for it.
+ * target/i386/kvm/hyperv-vsm-plane.c. Filling that file in against the P2
+ * kernel UAPI is the P4 class-B work.
  *
  * Model (vsm-on-planes-phases.md, "QEMU layer", as corrected by workers A
  * and B): one plane per VTL, created lazily at HvCallEnablePartitionVtl; one
@@ -243,11 +240,6 @@ typedef enum HvPlaneSwitchReason {
  * Implementation forms (D8): KVM_RUN on the plane-0 fd with
  * kvm_run->plane = @vtl and req_exit_planes = planes above @vtl; or KVM_RUN
  * on the plane vCPU fd of @vtl. Both on the VP's one host thread.
- * Current implementation: Nicolas's two-thread choreography (do_vtl0_upcall
- * / do_vtl1_entry / do_vtl0_downcall / do_vtl1_poll with cs->stop and
- * async_run_on_cpu, the inactive VTL parked in KVM_MP_STATE_HV_INACTIVE_VTL),
- * kept as-is to be replaced, not ported. In that implementation the
- * INTERRUPT case is issued from the VTL1 thread on the VTL0 CPUState.
  */
 int hv_plane_run_vtl(CPUState *cs, int vtl, HvPlaneSwitchReason reason);
 
@@ -256,16 +248,13 @@ int hv_plane_run_vtl(CPUState *cs, int vtl, HvPlaneSwitchReason reason);
  * running one has a pending event. (wait_for_vtl_event() in worker A's
  * terms: the run loop returned because of it.)
  *
- * Called by kvm.c from the KVM exit path of the vCPU that reported it.
- * D8 form 1: KVM_EXIT_PLANE_EVENT cause INTERRUPT on the running plane's
- * KVM_RUN, @cs the running (lower) plane, the pending plane in
- * kvm_run_plane_event(run)->plane. D8 form 2: the same exit on the plane
- * vCPU fd's KVM_RUN. Either way the implementation calls
- * hv_plane_run_vtl(@cs, that plane, HV_PLANE_SWITCH_INTERRUPT), because a
- * higher VTL's interrupt preempts a lower VTL (TLFS 15.3) and a lower VTL's
- * interrupt waits. Current implementation: KVM_SYSTEM_EVENT_WAKEUP on the
- * parked VTL1 vCPU itself, @cs the VTL1 CPUState. Returns what
- * kvm_arch_handle_exit() returns.
+ * Called by kvm.c from the KVM exit path of the vCPU that reported it:
+ * KVM_EXIT_PLANE_EVENT cause INTERRUPT on the running plane's KVM_RUN, @cs
+ * the running (lower) plane, the pending plane in run->plane_event.plane
+ * (both D8 forms). The implementation calls hv_plane_run_vtl(@cs, that
+ * plane, HV_PLANE_SWITCH_INTERRUPT), because a higher VTL's interrupt
+ * preempts a lower VTL (TLFS 15.3) and a lower VTL's interrupt waits.
+ * Returns what kvm_arch_handle_exit() returns.
  */
 int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run);
 

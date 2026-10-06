@@ -46,8 +46,3 @@ hyperv_vsm_hcall_start_virtual_processor(uint64_t partition_id, uint32_t vp_inde
 # hyperv-vsm-plane.c
 hyperv_vsm_plane_stub(const char *op, int vtl) "%s VTL%d not implemented"
 hyperv_vsm_plane_run_vtl(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"
-hyperv_vsm_plane_vtl_entry(uint32_t vp_index, unsigned int state) "VP %u event state 0x%x"
-hyperv_vsm_plane_vtl_upcall(uint32_t vp_index, unsigned int state, bool handled) "VP %u event state 0x%x handled %d"
-hyperv_vsm_plane_vtl_poll(uint32_t vp_index) "VP %u parked"
-hyperv_vsm_plane_vtl_downcall(uint32_t vp_index) "VP %u"
-hyperv_vsm_plane_vcpu_event(uint32_t vp_index, int vtl) "VP %u VTL%d woken"

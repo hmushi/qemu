@@ -6676,10 +6676,6 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         case KVM_SYSTEM_EVENT_TDX_FATAL:
             ret = tdx_handle_report_fatal_error(cpu, run);
             break;
-        case KVM_SYSTEM_EVENT_WAKEUP:
-            /* a vCPU parked in KVM_MP_STATE_HV_INACTIVE_VTL has an event */
-            ret = hv_plane_vtl_event(cs, run);
-            break;
         default:
             ret = -1;
             break;
