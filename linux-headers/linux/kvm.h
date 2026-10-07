@@ -155,15 +155,31 @@ struct kvm_plane_event_exit {
 #define KVM_PLANE_EVENT_CREATE_VCPU		1
 #define KVM_PLANE_EVENT_INTERRUPT		2
 #define KVM_PLANE_EVENT_LOWER_INTERRUPT	3
+#define KVM_PLANE_EVENT_DESC_LOAD		4
 	__u32 cause;
 	__u32 plane;
 	/*
 	 * KVM_PLANE_EVENT_INTERRUPT: higher planes in req_exit_planes with a
 	 * pending interrupt.  KVM_PLANE_EVENT_LOWER_INTERRUPT: lower planes in
 	 * req_exit_planes whose interrupt became pending since last reported.
+	 * KVM_PLANE_EVENT_DESC_LOAD: a descriptor-table load enabled with
+	 * KVM_CAP_X86_DESC_LOAD_EXIT; see the KVM_DESC_LOAD_* layout below.
 	 */
 	__u64 extra[8];
 };
+
+/*
+ * KVM_PLANE_EVENT_DESC_LOAD, extra[0]: the register (KVM_X86_DESC_*), whether
+ * the operand is in memory, and the instruction length.  extra[1]: the operand
+ * virtual address, or the source general-purpose register number (hardware
+ * encoding) for the register form of lldt/ltr.  extra[2]: the table limit for
+ * lgdt/lidt, the selector for lldt/ltr.  extra[3]: the table base for
+ * lgdt/lidt, 0 for lldt/ltr.  extra[4..7]: 0.
+ */
+#define KVM_DESC_LOAD_REG_MASK			0x3
+#define KVM_DESC_LOAD_IS_MEMORY_OP		(1 << 2)
+#define KVM_DESC_LOAD_INSN_LEN_SHIFT		8
+#define KVM_DESC_LOAD_INSN_LEN_MASK		(0xff << KVM_DESC_LOAD_INSN_LEN_SHIFT)
 
 #define KVM_S390_GET_SKEYS_NONE   1
 #define KVM_S390_SKEYS_MAX        1048576
@@ -1068,6 +1084,22 @@ struct kvm_enable_cap {
 #define KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT 255
 #define KVM_CAP_PLANES_USERSPACE_SWITCH 256
 #define KVM_CAP_HYPERV_VSM 257
+#define KVM_CAP_X86_DESC_LOAD_EXIT 258
+
+/*
+ * Available with KVM_CAP_X86_DESC_LOAD_EXIT: the descriptor-table registers,
+ * as a register number in KVM_PLANE_EVENT_DESC_LOAD and as a bit in the
+ * capability's argument and return value.
+ */
+#define KVM_X86_DESC_GDTR			0
+#define KVM_X86_DESC_IDTR			1
+#define KVM_X86_DESC_LDTR			2
+#define KVM_X86_DESC_TR				3
+#define KVM_X86_DESC_LOAD_EXIT_GDTR		(1 << KVM_X86_DESC_GDTR)
+#define KVM_X86_DESC_LOAD_EXIT_IDTR		(1 << KVM_X86_DESC_IDTR)
+#define KVM_X86_DESC_LOAD_EXIT_LDTR		(1 << KVM_X86_DESC_LDTR)
+#define KVM_X86_DESC_LOAD_EXIT_TR		(1 << KVM_X86_DESC_TR)
+#define KVM_X86_DESC_LOAD_EXIT_ALL		0xf
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
