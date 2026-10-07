@@ -111,35 +111,57 @@ static uint8_t kvm_apic_get_tpr(APICCommonState *s)
     return s->tpr >> 4;
 }
 
-static void kvm_apic_enable_tpr_reporting(APICCommonState *s, bool enable)
+static void kvm_apic_tpr_reporting_work(CPUState *cs, run_on_cpu_data data)
 {
     struct kvm_tpr_access_ctl ctl = {
-        .enabled = enable
+        .enabled = data.host_int
     };
+    int ret;
 
+    ret = kvm_vcpu_ioctl(cs, KVM_TPR_ACCESS_REPORTING, &ctl);
+    if (ret < 0) {
+        fprintf(stderr, "KVM: cannot %s TPR access reporting (%s)\n",
+                data.host_int ? "enable" : "disable", strerror(-ret));
+    }
+}
+
+static void kvm_apic_enable_tpr_reporting(APICCommonState *s, bool enable)
+{
     /* not a plane vCPU ioctl; the kvmvapic ROM is not used by a plane > 0 */
     if (cpu_is_plane_sibling(CPU(s->cpu))) {
         return;
     }
-    kvm_vcpu_ioctl(CPU(s->cpu), KVM_TPR_ACCESS_REPORTING, &ctl);
+    run_on_cpu(CPU(s->cpu), kvm_apic_tpr_reporting_work,
+               RUN_ON_CPU_HOST_INT(enable));
 }
 
-static void kvm_apic_vapic_base_update(APICCommonState *s)
+/*
+ * A vCPU ioctl has to come from the thread that runs the vCPU, and with
+ * planes the kernel refuses it from any other. Device reset runs elsewhere.
+ */
+static void kvm_apic_vapic_base_work(CPUState *cs, run_on_cpu_data data)
 {
+    APICCommonState *s = data.host_ptr;
     struct kvm_vapic_addr vapid_addr = {
         .vapic_addr = s->vapic_paddr,
     };
     int ret;
 
-    if (cpu_is_plane_sibling(CPU(s->cpu))) {
-        return;
-    }
-    ret = kvm_vcpu_ioctl(CPU(s->cpu), KVM_SET_VAPIC_ADDR, &vapid_addr);
+    ret = kvm_vcpu_ioctl(cs, KVM_SET_VAPIC_ADDR, &vapid_addr);
     if (ret < 0) {
         fprintf(stderr, "KVM: setting VAPIC address failed (%s)\n",
                 strerror(-ret));
         abort();
     }
+}
+
+static void kvm_apic_vapic_base_update(APICCommonState *s)
+{
+    if (cpu_is_plane_sibling(CPU(s->cpu))) {
+        return;
+    }
+    run_on_cpu(CPU(s->cpu), kvm_apic_vapic_base_work,
+               RUN_ON_CPU_HOST_PTR(s));
 }
 
 static void kvm_apic_put(CPUState *cs, run_on_cpu_data data)
