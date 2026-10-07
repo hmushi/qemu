@@ -558,6 +558,20 @@ static void load_vp_context(CPUState *cs, const struct hv_init_vp_context *c,
     if (enable_spiv) {
         apic_force_enable_spiv(cs);
     }
+
+    /*
+     * This call is the only thing that programs the plane's descriptor
+     * tables. The privileged level contains no table-load instruction, so it
+     * has no fallback: a level brought up without an interrupt table cannot
+     * take an exception at all and cannot report it. Assert the tables were
+     * taken from the context, so losing the assignments above fails here
+     * instead of silently. The caller commits them with an unconditional
+     * full-state put.
+     */
+    assert(env->idt.base == c->idtr.base);
+    assert(env->idt.limit == c->idtr.limit);
+    assert(env->gdt.base == c->gdtr.base);
+    assert(env->gdt.limit == c->gdtr.limit);
 }
 
 static bool vp_assist_enabled(CPUState *cs)

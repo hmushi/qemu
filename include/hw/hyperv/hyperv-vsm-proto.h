@@ -281,6 +281,38 @@ struct hv_init_vp_context {
     uint64_t msr_cr_pat;
 } QEMU_PACKED;
 
+/*
+ * The initial context is guest ABI, and the privileged level depends on us
+ * entirely for its descriptor tables: it carries no table-load instruction,
+ * so it has no fallback if a field moves here and we program a garbage base.
+ * That failure would be silent and fatal, so pin the layout. These offsets
+ * were checked field for field against the MS-derived hvgdk_mini.h in the
+ * kernel tree, not against this file.
+ */
+QEMU_BUILD_BUG_ON(sizeof(struct hv_x64_table_register) != 16);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_x64_table_register, limit) != 6);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_x64_table_register, base) != 8);
+
+QEMU_BUILD_BUG_ON(sizeof(struct hv_x64_segment_register) != 16);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_x64_segment_register, base) != 0);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_x64_segment_register, limit) != 8);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_x64_segment_register, selector) != 12);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_x64_segment_register, attributes) != 14);
+
+QEMU_BUILD_BUG_ON(sizeof(struct hv_init_vp_context) != 224);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, rip) != 0);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, rsp) != 8);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, rflags) != 16);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, cs) != 24);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, ldtr) != 136);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, idtr) != 152);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, gdtr) != 168);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, efer) != 184);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, cr0) != 192);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, cr3) != 200);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, cr4) != 208);
+QEMU_BUILD_BUG_ON(offsetof(struct hv_init_vp_context, msr_cr_pat) != 216);
+
 /* TLFS 15.5.2 HvCallEnableVpVtl input; also HvCallStartVirtualProcessor */
 struct hv_enable_vp_vtl {
     uint64_t partition_id;
