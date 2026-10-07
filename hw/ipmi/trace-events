@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# See docs/devel/tracing.rst for syntax documentation.
+
+# ipmi_bmc_sim.c
+ipmi_bmc_sim_sel_add_event(uint8_t type, uint64_t first, uint64_t second) "type 0x%02x record 0x%016" PRIx64 " 0x%016" PRIx64

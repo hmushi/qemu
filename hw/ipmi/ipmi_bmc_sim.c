@@ -27,6 +27,7 @@
 #include "qemu/timer.h"
 #include "hw/ipmi/ipmi.h"
 #include "qemu/error-report.h"
+#include "trace.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/core/loader.h"
@@ -467,10 +468,26 @@ static void sel_inc_reservation(IPMISel *sel)
     }
 }
 
+/* big-endian load, so the traced hex reads as bytes 0 to 7 in order */
+static uint64_t sel_event_half(const uint8_t *p)
+{
+    uint64_t v = 0;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        v = (v << 8) | p[i];
+    }
+    return v;
+}
+
 /* Returns 1 if the SEL is full and can't hold the event. */
 static int sel_add_event(IPMIBmcSim *ibs, uint8_t *event)
 {
     uint8_t ts[4];
+
+    /* as the guest wrote it: the record ID and timestamp are set below */
+    trace_ipmi_bmc_sim_sel_add_event(event[2], sel_event_half(event),
+                                     sel_event_half(event + 8));
 
     event[0] = 0xff;
     event[1] = 0xff;
