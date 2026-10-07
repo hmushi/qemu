@@ -1514,25 +1514,29 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
     }
     bql_unlock();
 
-    if (status != HV_STATUS_SUCCESS) {
-        return status;
-    }
-
-    if (!set) {
+    /*
+     * A rep hypercall applies each repeat on its own, so a failure partway
+     * leaves the earlier ones applied. @i is how many succeeded. Report it
+     * with the status, or the guest cannot tell a call that did nothing from
+     * one that did all but the last and cannot resume either (TLFS 3.9).
+     */
+    if (!set && i > 0) {
         if (fast) {
-            for (i = 0; i < nregs; i++, xmm_index += 2) {
-                hv_exit_xmm_set(exit, xmm_index, vals[i].low_part);
-                hv_exit_xmm_set(exit, xmm_index + 1, vals[i].high_part);
+            int j;
+
+            for (j = 0; j < i; j++, xmm_index += 2) {
+                hv_exit_xmm_set(exit, xmm_index, vals[j].low_part);
+                hv_exit_xmm_set(exit, xmm_index + 1, vals[j].high_part);
             }
         } else {
             uint64_t outgpa = exit->u.hcall.params[1] + rep_idx * sizeof(*vals);
 
-            vsm_physmem_write(cs, outgpa, vals, sizeof(*vals) * nregs);
+            vsm_physmem_write(cs, outgpa, vals, sizeof(*vals) * i);
         }
     }
 
-    return (uint64_t)HV_STATUS_SUCCESS |
-           ((uint64_t)nregs << HV_HYPERCALL_REP_COMP_OFFSET);
+    return (uint64_t)status |
+           ((uint64_t)i << HV_HYPERCALL_REP_COMP_OFFSET);
 }
 
 static bool gpa_is_overlay(CPUState *cs, uint64_t gpa)
