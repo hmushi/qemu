@@ -67,6 +67,43 @@
 #define HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK               0x000E0002
 #define HV_X64_REGISTER_CR_INTERCEPT_IA32_MISC_ENABLE_MASK  0x000E0003
 
+/*
+ * TLFS 15.13.4: the accesses of the next lower VTL that the configuring VTL
+ * intercepts.
+ */
+union hv_register_cr_intercept_control {
+    uint64_t as_uint64;
+    struct {
+        uint64_t cr0_write:1;
+        uint64_t cr4_write:1;
+        uint64_t xcr0_write:1;
+        uint64_t ia32_misc_enable_read:1;
+        uint64_t ia32_misc_enable_write:1;
+        uint64_t msr_lstar_read:1;
+        uint64_t msr_lstar_write:1;
+        uint64_t msr_star_read:1;
+        uint64_t msr_star_write:1;
+        uint64_t msr_cstar_read:1;
+        uint64_t msr_cstar_write:1;
+        uint64_t apic_base_msr_read:1;
+        uint64_t apic_base_msr_write:1;
+        uint64_t msr_efer_read:1;
+        uint64_t msr_efer_write:1;
+        uint64_t gdtr_write:1;
+        uint64_t idtr_write:1;
+        uint64_t ldtr_write:1;
+        uint64_t tr_write:1;
+        uint64_t msr_sysenter_cs_write:1;
+        uint64_t msr_sysenter_eip_write:1;
+        uint64_t msr_sysenter_esp_write:1;
+        uint64_t msr_sfmask_write:1;
+        uint64_t msr_tsc_aux_write:1;
+        uint64_t msr_sgx_launch_control_write:1;
+        uint64_t reserved:39;
+    };
+};
+
+
 /* TLFS 15.6.1 HvRegisterVsmCodePageOffsets */
 union hv_register_vsm_code_page_offsets {
     uint64_t as_uint64;

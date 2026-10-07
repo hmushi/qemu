@@ -66,7 +66,27 @@ struct VpVsmState {
     struct hyperv_message intercept_msg;
     /* HvRegisterVsmVina (TLFS 15.6.5) */
     union hv_register_vsm_vina vina;
+    /*
+     * TLFS 15.13.4 secure register intercepts this VTL configured for the
+     * next lower VTL. Only the descriptor-table write bits are enforced.
+     */
+    union hv_register_cr_intercept_control cr_intercept_control;
+    uint64_t cr_intercept_cr0_mask;
+    uint64_t cr_intercept_cr4_mask;
+    uint64_t cr_intercept_misc_enable_mask;
 };
+
+/* the loads the kernel reports, from KVM_CAP_X86_DESC_LOAD_EXIT */
+static uint32_t desc_load_exit_mask;
+
+/* KVM_CAP_X86_DESC_LOAD_EXIT mask for the loads @ctl intercepts */
+static uint32_t desc_load_exit_bits(union hv_register_cr_intercept_control ctl)
+{
+    return (ctl.gdtr_write ? KVM_X86_DESC_LOAD_EXIT_GDTR : 0) |
+           (ctl.idtr_write ? KVM_X86_DESC_LOAD_EXIT_IDTR : 0) |
+           (ctl.ldtr_write ? KVM_X86_DESC_LOAD_EXIT_LDTR : 0) |
+           (ctl.tr_write ? KVM_X86_DESC_LOAD_EXIT_TR : 0);
+}
 
 #define TYPE_VP_VSM "hyperv-vp-vsm"
 OBJECT_DECLARE_SIMPLE_TYPE(VpVsmState, VP_VSM)
@@ -417,6 +437,19 @@ int hyperv_vsm_init_vcpu(X86CPU *cpu)
         }
         qemu_register_reset(hyperv_vsm_reset, NULL);
         kvm_set_shutdown_dump_hook(hyperv_vsm_dump_protections);
+        /*
+         * Without the kernel feature the loads run natively while the secure
+         * kernel believes it intercepts them. Boot anyway; each skip is logged.
+         */
+        desc_load_exit_mask = kvm_check_extension(s,
+                                                  KVM_CAP_X86_DESC_LOAD_EXIT);
+        if ((desc_load_exit_mask & KVM_X86_DESC_LOAD_EXIT_ALL) !=
+            KVM_X86_DESC_LOAD_EXIT_ALL) {
+            warn_report("hyperv-vsm: kernel reports descriptor-table load "
+                        "exits 0x%x of 0x%x; register intercepts on them are "
+                        "not enforced", desc_load_exit_mask,
+                        KVM_X86_DESC_LOAD_EXIT_ALL);
+        }
         if (kvm_filter_msr(s, HV_X64_MSR_APIC_ASSIST_PAGE,
                            vp_assist_page_rdmsr, vp_assist_page_wrmsr) < 0 ||
             kvm_filter_msr(s, HV_X64_MSR_HYPERCALL,
@@ -1209,6 +1242,49 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
     return HV_STATUS_SUCCESS;
 }
 
+/*
+ * Make every lower VTL of @cs's VP exit on the descriptor loads @cs intercepts.
+ * Only the caller's own VP is armed; any other is refused and says so.
+ */
+static void arm_desc_load_exits(CPUState *cs)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+    uint32_t vp_index = hyperv_vp_index(cs);
+    uint32_t mask = desc_load_exit_bits(vpvsm->cr_intercept_control);
+    int vtl;
+
+    trace_hyperv_vsm_desc_load_arm(vp_index, active_vtl(cs),
+                                   vpvsm->cr_intercept_control.as_uint64,
+                                   mask, desc_load_exit_mask);
+    if (mask & ~desc_load_exit_mask) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VP %u VTL%d intercepts "
+                      "descriptor loads 0x%x, kernel reports 0x%x; not "
+                      "armed\n", vp_index, active_vtl(cs), mask,
+                      desc_load_exit_mask);
+        mask &= desc_load_exit_mask;
+    }
+    for (vtl = 0; vtl < active_vtl(cs); vtl++) {
+        CPUState *lower = sibling(cs, vtl);
+        int ret;
+
+        if (!lower) {
+            continue;
+        }
+        if (!qemu_cpu_is_self(lower)) {
+            qemu_log_mask(LOG_UNIMP, "hyperv-vsm: descriptor intercepts for "
+                          "VP %u VTL%d configured from another thread; not "
+                          "armed\n", vp_index, vtl);
+            continue;
+        }
+        ret = kvm_vcpu_enable_cap(lower, KVM_CAP_X86_DESC_LOAD_EXIT, 0, mask);
+        if (ret < 0) {
+            qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: cannot arm descriptor "
+                          "load exits 0x%x on VP %u VTL%d: %d\n", mask,
+                          vp_index, vtl, ret);
+        }
+    }
+}
+
 static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
                                 CPUState *target_vcpu, bool *dirty)
 {
@@ -1329,11 +1405,18 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         set_vina(target_vcpu, val->low_part);
         return HV_STATUS_SUCCESS;
     case HV_X64_REGISTER_CR_INTERCEPT_CONTROL:
+        get_vp_vsm(target_vcpu)->cr_intercept_control.as_uint64 = val->low_part;
+        arm_desc_load_exits(target_vcpu);
+        return HV_STATUS_SUCCESS;
+    /* stored for GetVpRegisters; CR and MSR intercepts are not enforced */
     case HV_X64_REGISTER_CR_INTERCEPT_CR0_MASK:
+        get_vp_vsm(target_vcpu)->cr_intercept_cr0_mask = val->low_part;
+        return HV_STATUS_SUCCESS;
     case HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK:
+        get_vp_vsm(target_vcpu)->cr_intercept_cr4_mask = val->low_part;
+        return HV_STATUS_SUCCESS;
     case HV_X64_REGISTER_CR_INTERCEPT_IA32_MISC_ENABLE_MASK:
-        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: SetVpRegisters: register 0x%x "
-                      "accepted but not implemented\n", name);
+        get_vp_vsm(target_vcpu)->cr_intercept_misc_enable_mask = val->low_part;
         return HV_STATUS_SUCCESS;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: SetVpRegisters: unknown "
@@ -2002,7 +2085,7 @@ static void intercept_cb(void *data, int status)
     }
 }
 
-/* Post @msg on SINT0 of @cs (the higher VTL vCPU of the faulting VP) */
+/* Post intercept @msg on SINT0 of @cs, the higher VTL vCPU of that VP */
 static int deliver_memory_intercept(CPUState *cs,
                                     const struct hyperv_message *msg)
 {
