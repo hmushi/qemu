@@ -356,6 +356,18 @@ static void clear_vina_work(CPUState *cs, run_on_cpu_data arg)
     set_vina(cs, 0);
 }
 
+/* on the plane's own thread: a reset guest has not armed any intercept */
+static void disarm_desc_load_work(CPUState *cs, run_on_cpu_data arg)
+{
+    int ret = kvm_vcpu_enable_cap(cs, KVM_CAP_X86_DESC_LOAD_EXIT, 0, 0);
+
+    if (ret < 0 && ret != -EINVAL) {
+        qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: cannot disarm descriptor "
+                      "load exits on VP %u VTL%d: %d\n", hyperv_vp_index(cs),
+                      active_vtl(cs), ret);
+    }
+}
+
 static void hyperv_vsm_reset(void *opaque)
 {
     CPUState *cs;
@@ -377,6 +389,19 @@ static void hyperv_vsm_reset(void *opaque)
         }
         memset(vpvsm->vtl_config, 0, sizeof(vpvsm->vtl_config));
         run_on_cpu(cs, clear_vina_work, RUN_ON_CPU_NULL);
+        /*
+         * The planes survive the reset. What would survive with them is the
+         * VSM configuration the last boot's higher VTL armed on them.
+         */
+        vpvsm->cr_intercept_control.as_uint64 = 0;
+        vpvsm->cr_intercept_cr0_mask = 0;
+        vpvsm->cr_intercept_cr4_mask = 0;
+        vpvsm->cr_intercept_misc_enable_mask = 0;
+        vpvsm->intercepts_unposted = 0;
+        vpvsm->synic_traced = false;
+        if (desc_load_exit_mask) {
+            run_on_cpu(cs, disarm_desc_load_work, RUN_ON_CPU_NULL);
+        }
         vpvsm->vp_status.as_uint64 = 0;
         vpvsm->vp_status.enabled_vtl_set = BIT(0);
         vpvsm->vp_status.active_vtl = active_vtl(cs);
@@ -955,19 +980,27 @@ uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param, bool fast)
 
     target_vcpu = hv_plane_vcpu(input.vp_index, 0);
     if (!target_vcpu) {
+        trace_hyperv_vsm_enable_vp_vtl_reject("no such VP", input.vp_index,
+                                              input.target_vtl);
         return HV_STATUS_INVALID_VP_INDEX;
     }
     vpvsm = get_vp_vsm(target_vcpu);
 
     if (input.target_vtl > hv_vsm.partition_status.maximum_vtl) {
+        trace_hyperv_vsm_enable_vp_vtl_reject("VTL above maximum",
+                                              input.vp_index, input.target_vtl);
         return HV_STATUS_INVALID_PARAMETER;
     }
 
     if (!(hv_vsm.partition_status.enabled_vtl_set & BIT(input.target_vtl))) {
+        trace_hyperv_vsm_enable_vp_vtl_reject("VTL not enabled for partition",
+                                              input.vp_index, input.target_vtl);
         return HV_STATUS_INVALID_PARAMETER;
     }
 
     if (vpvsm->vp_status.enabled_vtl_set & BIT(input.target_vtl)) {
+        trace_hyperv_vsm_enable_vp_vtl_reject("VTL already enabled for VP",
+                                              input.vp_index, input.target_vtl);
         return HV_STATUS_INVALID_PARAMETER;
     }
 

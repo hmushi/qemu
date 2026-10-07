@@ -177,12 +177,24 @@ static void select_plane_work(CPUState *leader, run_on_cpu_data arg)
 
 void hv_plane_reset(void)
 {
-    CPUState *cs;
+    CPUState *cs, *plane;
 
     CPU_FOREACH(cs) {
-        if (cs->kvm_plane_next) {
-            run_on_cpu(cs, select_plane_work, RUN_ON_CPU_HOST_PTR(cs));
+        if (!cs->kvm_plane_next) {
+            continue;
         }
+        /*
+         * Each plane vCPU resets through its own callback, registered after
+         * this one, so this records the state those callbacks start from.
+         */
+        for (plane = cs->kvm_plane_next; plane; plane = plane->kvm_plane_next) {
+            CPUX86State *env = &X86_CPU(plane)->env;
+
+            trace_hyperv_vsm_plane_vcpu_reset(hyperv_vp_index(plane),
+                                              plane->kvm_plane, env->eip,
+                                              env->cr[0], env->idt.limit);
+        }
+        run_on_cpu(cs, select_plane_work, RUN_ON_CPU_HOST_PTR(cs));
     }
 }
 
