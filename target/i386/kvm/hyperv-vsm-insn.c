@@ -182,6 +182,9 @@ static bool decode_0f(InsnDecoder *d)
         return next(d) >= 0 && modrm(d);
     case 0x3a:                                  /* 0F 3A map: ModRM + imm8 */
         return next(d) >= 0 && modrm(d) && skip(d, 1);
+    case 0x20: case 0x21: case 0x22: case 0x23:
+        /* MOV to/from CR/DR: mod is ignored, the operand is always a reg */
+        return next(d) >= 0;
     case 0x80 ... 0x8f:                         /* Jcc rel32 */
         return imm_z(d);
     case 0x70: case 0x71: case 0x72: case 0x73:

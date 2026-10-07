@@ -83,6 +83,18 @@ static const InsnCase cases[] = {
     /* the neighbouring map-1 opcodes still take one */
     { "vpcmpeqw (%rax),%ymm0,%ymm0", 64, 4, { 0xc5, 0xfd, 0x75, 0x00 } },
     { "vmovntdq %ymm0,(%rax)", 64, 4, { 0xc5, 0xfd, 0xe7, 0x00 } },
+
+    /*
+     * MOV to and from CR and DR (0F 20 to 0F 23) ignore the ModRM mod field
+     * and always address a register, so these never carry a SIB byte or a
+     * displacement whatever mod says.
+     */
+    { "mov %cr0,%rax", 64, 3, { 0x0f, 0x20, 0xc0 } },
+    { "mov %rax,%cr0", 64, 3, { 0x0f, 0x22, 0xc0 } },
+    { "mov %cr8,%rax", 64, 4, { 0x44, 0x0f, 0x20, 0xc0 } },
+    { "mov %rdi,%db0 with mod 2", 64, 3, { 0x0f, 0x23, 0x87 } },
+    { "mov %db0,%rbp with mod 0 rm 5", 64, 3, { 0x0f, 0x21, 0x05 } },
+    { "mov %cr0,%rbp with mod 0 rm 5", 64, 3, { 0x0f, 0x20, 0x05 } },
 };
 
 static void test_lengths(void)
