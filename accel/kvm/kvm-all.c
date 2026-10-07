@@ -3722,30 +3722,53 @@ int kvm_cpu_exec(CPUState *cpu)
             ret = EXCP_INTERRUPT;
             break;
         case KVM_EXIT_SHUTDOWN: {
-            CPUState *faulted = cpu;
+            CPUState *leader = cpu->kvm_plane_leader ?: cpu;
+            CPUState *faulted = NULL;
             CPUState *p;
+            bool cached;
 
             /*
              * On x86 this exit is a triple fault, and the reset below discards
-             * the state that caused it. KVM_RUN always goes to the plane-0 fd,
-             * so @cpu is plane 0 whichever plane ran: resolve the exiting one
-             * from run->plane, or the dump describes a sibling instead.
-             *
-             * Read idt.limit to tell the three cases apart:
-             *   0xfff-ish with a kernel base - the guest state at the fault
-             *   0xffff with base 0           - a reset has been serviced
-             *   0 with base 0                - an unfilled struct, not a guest
+             * the state that caused it, so dump it here. @cpu is whichever
+             * CPUState kvm_plane_select() picked, so it is not always plane 0:
+             * resolve the exiting one from run->plane, which KVM_RUN carries
+             * in both directions. kvm_plane_next hangs off the leader, so walk
+             * from there or planes at or before @cpu are unreachable.
              */
-            for (p = cpu->kvm_plane_next; p; p = p->kvm_plane_next) {
+            if (run->plane == 0) {
+                faulted = leader;
+            }
+            for (p = qatomic_rcu_read(&leader->kvm_plane_next); !faulted && p;
+                 p = qatomic_rcu_read(&p->kvm_plane_next)) {
                 if (p->kvm_plane == run->plane) {
                     faulted = p;
-                    break;
                 }
             }
+            if (!faulted) {
+                qemu_log("kvm: guest shutdown exit, ran plane %d resolves to "
+                         "no vCPU; dumping the selected one\n", run->plane);
+                faulted = cpu;
+            }
+
+            /*
+             * Say whether the register file was read from KVM. A synchronise
+             * is a no-op on an already-dirty CPUState, so it does not by
+             * itself make the dump a guest value, and every field below comes
+             * from this one read: the code bytes, both descriptor registers,
+             * cr2 and cr3. This flag, not idt.limit, is what separates a
+             * guest value from an unfilled struct: base 0 with limit 0 is a
+             * real state for a guest that loads one. Once the read is known
+             * good, idt.limit separates the fault from a serviced reset: a
+             * kernel base with a small limit is the state at the fault, base
+             * 0 with limit 0xffff is the reset vector.
+             */
+            cached = faulted->vcpu_dirty;
             trace_kvm_run_exit_shutdown(faulted->cpu_index, run->plane);
             kvm_cpu_synchronize_state(faulted);
-            qemu_log("kvm: guest shutdown exit, cpu %d plane %d (ran plane %d)"
-                     "\n", faulted->cpu_index, faulted->kvm_plane, run->plane);
+            qemu_log("kvm: guest shutdown exit, cpu %d plane %d, ran plane %d "
+                     "(%s)\n", faulted->cpu_index, faulted->kvm_plane,
+                     run->plane, cached ? "CACHED file, not read from KVM"
+                                        : "read from KVM");
             log_cpu_state(faulted, CPU_DUMP_CODE);
             if (kvm_shutdown_dump) {
                 kvm_shutdown_dump(faulted);

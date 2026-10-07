@@ -1717,11 +1717,13 @@ void hyperv_vsm_dump_protections(CPUState *cs)
              prot_is_no_access(GPOINTER_TO_UINT(g_hash_table_lookup(prots,
                  GUINT_TO_POINTER(cr3_gfn)))) ? "YES" : "no");
     /*
-     * Every field above and below comes from the exiting plane's own
-     * synchronised read. Judge it by idt.limit: a kernel base with a small
-     * limit is the state at the fault, base 0 with 0xffff is a serviced
-     * reset, base 0 with limit 0 is an unfilled struct and not a guest
-     * value. In the last case distrust this whole block.
+     * Every field above and below comes from the exiting plane's own register
+     * read. Whether that read reached KVM is stated on the shutdown line
+     * above this block; if it says the file was cached, distrust all of it.
+     * idt.limit does not answer that question, because base 0 with limit 0 is
+     * a real state for a guest that loads one. Once the read is known good, a
+     * kernel base with a small limit is the state at the fault and base 0
+     * with limit 0xffff is the reset vector.
      */
     qemu_log("hyperv-vsm: idtr base=0x%" PRIx64 " limit=0x%x, gdtr base=0x%"
              PRIx64 " limit=0x%x (linear, not translated here)\n",
