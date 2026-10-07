@@ -3721,23 +3721,39 @@ int kvm_cpu_exec(CPUState *cpu)
         case KVM_EXIT_IRQ_WINDOW_OPEN:
             ret = EXCP_INTERRUPT;
             break;
-        case KVM_EXIT_SHUTDOWN:
-            trace_kvm_run_exit_shutdown(cpu->cpu_index, cpu->kvm_plane);
+        case KVM_EXIT_SHUTDOWN: {
+            CPUState *faulted = cpu;
+            CPUState *p;
+
             /*
-             * On x86 this exit is a triple fault. The reset below discards the
-             * state that caused it, and the window is too short to sample from
-             * outside, so dump it here while it still exists.
+             * On x86 this exit is a triple fault, and the reset below discards
+             * the state that caused it. KVM_RUN always goes to the plane-0 fd,
+             * so @cpu is plane 0 whichever plane ran: resolve the exiting one
+             * from run->plane, or the dump describes a sibling instead.
+             *
+             * Read idt.limit to tell the three cases apart:
+             *   0xfff-ish with a kernel base - the guest state at the fault
+             *   0xffff with base 0           - a reset has been serviced
+             *   0 with base 0                - an unfilled struct, not a guest
              */
-            kvm_cpu_synchronize_state(cpu);
-            qemu_log("kvm: guest shutdown exit, cpu %d plane %d\n",
-                     cpu->cpu_index, cpu->kvm_plane);
-            log_cpu_state(cpu, CPU_DUMP_CODE);
+            for (p = cpu->kvm_plane_next; p; p = p->kvm_plane_next) {
+                if (p->kvm_plane == run->plane) {
+                    faulted = p;
+                    break;
+                }
+            }
+            trace_kvm_run_exit_shutdown(faulted->cpu_index, run->plane);
+            kvm_cpu_synchronize_state(faulted);
+            qemu_log("kvm: guest shutdown exit, cpu %d plane %d (ran plane %d)"
+                     "\n", faulted->cpu_index, faulted->kvm_plane, run->plane);
+            log_cpu_state(faulted, CPU_DUMP_CODE);
             if (kvm_shutdown_dump) {
-                kvm_shutdown_dump(cpu);
+                kvm_shutdown_dump(faulted);
             }
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             ret = EXCP_INTERRUPT;
             break;
+        }
         case KVM_EXIT_UNKNOWN:
             fprintf(stderr, "KVM: unknown exit, hardware reason %" PRIx64 "\n",
                     (uint64_t)run->hw.hardware_exit_reason);
