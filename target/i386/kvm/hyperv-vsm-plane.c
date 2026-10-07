@@ -256,6 +256,23 @@ static uint16_t higher_planes(CPUState *cs, int vtl)
     return mask;
 }
 
+/* descriptor state of both planes at a switch step; idt/gdt are per-VTL */
+static void trace_desc_state(const char *phase, CPUState *cs, CPUState *target)
+{
+    CPUState *c[2] = { cs, target };
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        CPUX86State *env = &X86_CPU(c[i])->env;
+
+        trace_hyperv_vsm_plane_desc_state(phase, hyperv_vp_index(c[i]),
+                                          hv_plane_active_vtl(c[i]),
+                                          c[i]->vcpu_dirty, env->idt.base,
+                                          env->idt.limit, env->gdt.base,
+                                          env->gdt.limit);
+    }
+}
+
 int hv_plane_run_vtl(CPUState *cs, int target_vtl, HvPlaneSwitchReason reason)
 {
     CPUState *target = vtl_sibling(cs, target_vtl);
@@ -277,12 +294,15 @@ int hv_plane_run_vtl(CPUState *cs, int target_vtl, HvPlaneSwitchReason reason)
      * the whole file is pushed back before its next KVM_RUN (the
      * synchronize marks it dirty).
      */
+    trace_desc_state("pre-sync", cs, target);
     cpu_synchronize_state(cs);
     cpu_synchronize_state(target);
+    trace_desc_state("post-sync", cs, target);
 
     bql_lock();
     hyperv_vsm_vtl_switch_state(cs, target, reason);
     bql_unlock();
+    trace_desc_state("post-shared", cs, target);
 
     /* MTRRs, MCG and VP runtime are reset-level MSRs: push them now */
     ret = kvm_put_hv_shared_msrs(X86_CPU(target));

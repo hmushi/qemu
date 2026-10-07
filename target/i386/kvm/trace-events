@@ -49,4 +49,5 @@ hyperv_vsm_hypercall_msr_read(uint32_t vp_index, int vtl, uint64_t val) "VP %u V
 hyperv_vsm_vina_config(uint32_t vp_index, int vtl, uint64_t val) "VP %u VTL%d VINA 0x%" PRIx64
 hyperv_vsm_vina_notify(uint32_t vp_index, int vtl, unsigned vector) "VP %u VTL%d VINA vector 0x%x"
 hyperv_vsm_plane_vtl_event(uint32_t vp_index, int vtl, uint32_t cause, uint32_t plane, uint64_t extra) "VP %u running VTL%d: plane event cause %u plane %u extra 0x%" PRIx64
+hyperv_vsm_plane_desc_state(const char *phase, uint32_t vp_index, int vtl, int dirty, uint64_t idt_base, uint32_t idt_limit, uint64_t gdt_base, uint32_t gdt_limit) "%s VP %u VTL%d dirty %d idt 0x%" PRIx64 "/0x%x gdt 0x%" PRIx64 "/0x%x"
 hyperv_vsm_plane_run_vtl(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"
