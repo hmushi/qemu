@@ -536,6 +536,9 @@ int hv_plane_vtl_event(CPUState *cs, struct kvm_run *run)
             hyperv_vsm_vina_notify(cs);
         }
         return 0;
+    case KVM_PLANE_EVENT_DESC_LOAD:
+        /* a descriptor-table load the next VTL intercepts (TLFS 15.13.4) */
+        return kvm_hv_handle_desc_load(cs, ev);
     case KVM_PLANE_EVENT_CREATE_VCPU:
         /* SNP AP creation; Hyper-V VTLs create their vCPUs from userspace */
         qemu_log_mask(LOG_UNIMP, "hyperv-vsm: unexpected plane vCPU creation "

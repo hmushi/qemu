@@ -103,6 +103,30 @@ union hv_register_cr_intercept_control {
     };
 };
 
+/*
+ * TLFS 11.10.2 register intercept message type. hvgdk_mini.h names this
+ * value HVMSG_X64_IOMMU_PRQ; the TLFS value is the one Windows consumes.
+ */
+#define HV_MESSAGE_X64_REGISTER_INTERCEPT 0x80010006
+
+/*
+ * TLFS 11.10.2 register intercept message, posted on SINT0 of the
+ * configuring VTL.
+ */
+struct hv_vsm_register_intercept_message {
+    struct hv_x64_intercept_message_header header;
+    uint8_t is_memory_op:1;
+    uint8_t reserved:7;
+    uint8_t reserved_0;
+    uint16_t reserved_1;
+    uint32_t reg_name;
+    union {
+        struct hv_u128 reg128;
+        uint64_t reg64;
+        uint16_t reg16;
+        struct hv_x64_table_register table;
+    } source_value;
+} QEMU_PACKED;
 
 /* TLFS 15.6.1 HvRegisterVsmCodePageOffsets */
 union hv_register_vsm_code_page_offsets {

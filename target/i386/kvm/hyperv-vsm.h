@@ -92,6 +92,9 @@ void hyperv_vsm_vtl_switch_state(CPUState *prev, CPUState *next,
 bool hv_plane_last_idt(int vtl, uint64_t *base, uint32_t *limit);
 
 bool hyperv_vsm_vina_armed(CPUState *cs);
+/* KVM_PLANE_EVENT_DESC_LOAD on @cs: message to the next VTL, then switch */
+int kvm_hv_handle_desc_load(CPUState *cs,
+                            const struct kvm_plane_event_exit *ev);
 int hyperv_vsm_vina_notify(CPUState *cs);
 
 #endif /* TARGET_I386_KVM_HYPERV_VSM_H */

@@ -2147,6 +2147,87 @@ int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
     return hv_plane_run_vtl(cs, vtl + 1, HV_PLANE_SWITCH_INTERCEPT);
 }
 
+/*
+ * A descriptor-table load the next higher VTL intercepts (TLFS 15.13.4),
+ * reported with nothing executed and RIP in place. Post and switch up.
+ */
+int kvm_hv_handle_desc_load(CPUState *cs, const struct kvm_plane_event_exit *ev)
+{
+    static const uint32_t reg_name[] = {
+        [KVM_X86_DESC_GDTR] = HV_X64_REGISTER_GDTR,
+        [KVM_X86_DESC_IDTR] = HV_X64_REGISTER_IDTR,
+        [KVM_X86_DESC_LDTR] = HV_X64_REGISTER_LDTR,
+        [KVM_X86_DESC_TR] = HV_X64_REGISTER_TR,
+    };
+    struct hyperv_message msg = {};
+    struct hv_vsm_register_intercept_message *icpt = (void *)msg.payload;
+    struct hv_x64_intercept_message_header *hdr = &icpt->header;
+    CPUX86State *env = &X86_CPU(cs)->env;
+    struct hv_x64_segment_register seg;
+    unsigned reg = ev->extra[0] & KVM_DESC_LOAD_REG_MASK;
+    unsigned len = (ev->extra[0] & KVM_DESC_LOAD_INSN_LEN_MASK) >>
+                   KVM_DESC_LOAD_INSN_LEN_SHIFT;
+    int vtl = active_vtl(cs);
+    CPUState *next;
+
+    QEMU_BUILD_BUG_ON(sizeof(*icpt) > sizeof(msg.payload));
+
+    if (ev->plane != cs->kvm_plane) {
+        error_report("hyperv-vsm: descriptor load reported for plane %u on "
+                     "plane %d", ev->plane, cs->kvm_plane);
+        return -1;
+    }
+    next = sibling(cs, vtl + 1);
+    if (!next) {
+        return -1;
+    }
+
+    cpu_synchronize_state(cs);
+
+    msg.header.message_type = HV_MESSAGE_X64_REGISTER_INTERCEPT;
+    msg.header.payload_size = sizeof(*icpt);
+    hdr->vp_index = hyperv_vp_index(cs);
+    hdr->instruction_length = len;
+    hdr->intercept_access_type = HV_X64_INTERCEPT_ACCESS_TYPE_WRITE;
+    get_seg(&env->segs[R_CS], &hdr->cs_segment);
+    get_seg(&env->segs[R_SS], &seg);
+    hdr->execution_state.cpl = seg.descriptor_privilege_level;
+    hdr->execution_state.cr0_pe = !!(env->cr[0] & CR0_PE_MASK);
+    hdr->execution_state.cr0_am = !!(env->cr[0] & CR0_AM_MASK);
+    hdr->execution_state.efer_lma = !!(env->efer & MSR_EFER_LMA);
+    hdr->execution_state.vtl = vtl;
+    hdr->rip = env->eip;
+    hdr->rflags = env->eflags;
+
+    /*
+     * Windows reads source_value with is_memory_op set on every intercept,
+     * register form included; source_address is not used.
+     */
+    icpt->is_memory_op = 1;
+    icpt->reg_name = reg_name[reg];
+    switch (reg) {
+    case KVM_X86_DESC_GDTR:
+    case KVM_X86_DESC_IDTR:
+        icpt->source_value.table.limit = ev->extra[2];
+        icpt->source_value.table.base = ev->extra[3];
+        break;
+    default:
+        icpt->source_value.reg16 = ev->extra[2];
+        break;
+    }
+
+    trace_hyperv_vsm_desc_load_intercept(hdr->vp_index, vtl, icpt->reg_name,
+                                         !!(ev->extra[0] &
+                                            KVM_DESC_LOAD_IS_MEMORY_OP),
+                                         ev->extra[3], ev->extra[2], hdr->rip,
+                                         len);
+
+    if (deliver_memory_intercept(next, &msg)) {
+        return -1;
+    }
+    return hv_plane_run_vtl(cs, vtl + 1, HV_PLANE_SWITCH_INTERCEPT);
+}
+
 /* HV_MAP_GPA_* permissions to plane access restrictions */
 static uint64_t map_flags_to_memattrs(uint32_t flags)
 {
