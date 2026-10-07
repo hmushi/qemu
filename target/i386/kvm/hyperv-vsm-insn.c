@@ -202,6 +202,12 @@ static bool decode_0f(InsnDecoder *d)
     }
 }
 
+/* 15 bytes is the architectural maximum; a longer encoding raises #GP */
+static int capped_len(const InsnDecoder *d)
+{
+    return d->pos <= 15 ? d->pos : 0;
+}
+
 /* VEX/XOP/EVEX: @map is the opcode map (1 = 0F, 2 = 0F 38, 3 = 0F 3A) */
 static bool decode_vex_opcode(InsnDecoder *d, int map)
 {
@@ -301,7 +307,7 @@ int hyperv_vsm_insn_len(const uint8_t *buf, int len, int mode)
             if (!decode_vex_opcode(&d, map)) {
                 return 0;
             }
-            return d.pos;
+            return capped_len(&d);
         }
     }
 
@@ -312,5 +318,5 @@ int hyperv_vsm_insn_len(const uint8_t *buf, int len, int mode)
     } else if (!decode_one_byte(&d, op)) {
         return 0;
     }
-    return d.pos <= 15 ? d.pos : 0;
+    return capped_len(&d);
 }

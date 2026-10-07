@@ -95,6 +95,19 @@ static const InsnCase cases[] = {
     { "mov %rdi,%db0 with mod 2", 64, 3, { 0x0f, 0x23, 0x87 } },
     { "mov %db0,%rbp with mod 0 rm 5", 64, 3, { 0x0f, 0x21, 0x05 } },
     { "mov %cr0,%rbp with mod 0 rm 5", 64, 3, { 0x0f, 0x20, 0x05 } },
+
+    /*
+     * 15 bytes is the architectural maximum instruction length. A longer
+     * encoding raises #GP and is not an instruction, so it has no length.
+     * The intercept header field is 4 bits wide, so a reported 16 would be
+     * stored as 0 anyway, but silently and without the undecodable log.
+     */
+    { "15-byte vpshufd, the limit", 64, 15,
+      { 0x66, 0x66, 0x66, 0x66, 0x66, 0xc5, 0xfd, 0x70, 0x84, 0x24,
+        0x11, 0x22, 0x33, 0x44, 0x55 } },
+    { "16-byte vpshufd, over the limit", 64, 0,
+      { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0xc5, 0xfd, 0x70, 0x84, 0x24,
+        0x11, 0x22, 0x33, 0x44, 0x55 } },
 };
 
 static void test_lengths(void)
