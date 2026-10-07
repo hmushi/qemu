@@ -575,18 +575,24 @@ static void reset_vp_scratch_regs(CPUState *cs)
 }
 
 static void load_vp_context(CPUState *cs, const struct hv_init_vp_context *c,
-                            bool enable_spiv)
+                            bool enable_spiv, hwaddr input_gpa)
 {
     CPUX86State *env = &X86_CPU(cs)->env;
 
     /*
      * The descriptor tables are traced because this call is the only thing
      * that programs them for the plane: the secure kernel carries no table
-     * load of its own. cr0 and cr4 do not fit the 10-argument trace limit.
+     * load of its own. The second line carries the rest of the context that
+     * a start failure has turned on so far, and the address the packet was
+     * read from, so the packet can be read back out of guest memory. Two
+     * lines because a trace event takes at most ten arguments.
      */
     trace_hyperv_vsm_vp_context(hyperv_vp_index(cs), active_vtl(cs), c->rip,
                                 c->rsp, c->cr3, c->efer, c->idtr.base,
                                 c->idtr.limit, c->gdtr.base, c->gdtr.limit);
+    trace_hyperv_vsm_vp_context2(hyperv_vp_index(cs), active_vtl(cs),
+                                 c->rflags, c->cr0, c->cr4, c->gs.base,
+                                 c->fs.base, input_gpa);
 
     env->regs[R_ESP] = c->rsp;
     env->eip = c->rip;
@@ -1019,7 +1025,7 @@ uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param, bool fast)
     }
 
     bql_lock();
-    load_vp_context(vtl_cpu, &input.vp_context, true);
+    load_vp_context(vtl_cpu, &input.vp_context, true, param);
     cpu_synchronize_post_reset(vtl_cpu);
     bql_unlock();
 
@@ -2680,7 +2686,8 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
      * enabled APIC; a VTL0 VP enables its own, as after a SIPI.
      */
     reset_vp_scratch_regs(vcpu);
-    load_vp_context(vcpu, &input.vp_context, input.target_vtl > 0);
+    load_vp_context(vcpu, &input.vp_context, input.target_vtl > 0,
+                    exit->u.hcall.params[0]);
     cpu_synchronize_post_reset(vcpu);
 
     start_vtl = highest_vtl(vpvsm->vp_status.enabled_vtl_set);

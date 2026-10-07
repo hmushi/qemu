@@ -32,6 +32,7 @@ hyperv_vsm_setup_hypercall_page(uint32_t vp_index, int vtl, bool enable, uint64_
 hyperv_vsm_setup_vp_assist_page(uint32_t vp_index, int vtl, bool enable, uint64_t gpa) "VP %u VTL%d enable %d gpa 0x%" PRIx64
 hyperv_vsm_msr_eoi_fixup(uint32_t vp_index, uint64_t val) "VP %u EOI 0x%" PRIx64
 hyperv_vsm_vp_context(uint32_t vp_index, int vtl, uint64_t rip, uint64_t rsp, uint64_t cr3, uint64_t efer, uint64_t idt_base, uint32_t idt_limit, uint64_t gdt_base, uint32_t gdt_limit) "VP %u VTL%d rip 0x%" PRIx64 " rsp 0x%" PRIx64 " cr3 0x%" PRIx64 " efer 0x%" PRIx64 " idtr 0x%" PRIx64 "/0x%x gdtr 0x%" PRIx64 "/0x%x"
+hyperv_vsm_vp_context2(uint32_t vp_index, int vtl, uint64_t rflags, uint64_t cr0, uint64_t cr4, uint64_t gs_base, uint64_t fs_base, uint64_t input_gpa) "VP %u VTL%d rflags 0x%" PRIx64 " cr0 0x%" PRIx64 " cr4 0x%" PRIx64 " gs.base 0x%" PRIx64 " fs.base 0x%" PRIx64 " input gpa 0x%" PRIx64
 hyperv_vsm_vtl_switch_state(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"
 hyperv_vsm_hcall_enable_partition_vtl(uint64_t partition_id, uint8_t target_vtl, uint8_t flags) "partition 0x%" PRIx64 " target VTL%u flags 0x%x"
 hyperv_vsm_hcall_enable_vp_vtl(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl) "partition 0x%" PRIx64 " VP %u target VTL%u"
