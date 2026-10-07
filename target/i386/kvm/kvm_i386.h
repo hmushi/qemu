@@ -92,6 +92,8 @@ int kvm_filter_msr(KVMState *s, uint32_t msr, QEMURDMSRHandler *rdmsr,
 
 int kvm_put_mp_state(X86CPU *cpu);
 int kvm_put_hv_shared_msrs(X86CPU *cpu);
+int kvm_get_vcpu_dtables(CPUState *cpu, struct kvm_dtable *idt,
+                         struct kvm_dtable *gdt);
 #endif /* CONFIG_KVM */
 
 void kvm_smm_cpu_address_space_init(X86CPU *cpu);

@@ -394,6 +394,9 @@ static uint16_t vina_lower_planes(CPUState *cs, struct kvm_run *run)
     return BIT(cs->kvm_plane) - 1;
 }
 
+/* post-switch entries read back, and how many of those carried a null */
+static uint64_t entry_reads, entry_nulls;
+
 void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
 {
     /* a higher VTL's pending interrupt ends this VTL's run (TLFS 15.3) */
@@ -401,6 +404,42 @@ void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
     /* a lower VTL's pending interrupt is notified by VINA (TLFS 15.2.3) */
     if (cs->kvm_plane > 0) {
         run->req_exit_planes |= vina_lower_planes(cs, run);
+    }
+
+    /*
+     * The entry this plane resumes at is where both triple faults are, and
+     * our own copy reads correct at every switch, so the question is what
+     * the entered state holds rather than what we hold. Read it back here,
+     * the last point before KVM_RUN, on an entry whose plane differs from
+     * the one the shared page last ran: that is a switch return. Report
+     * only a null interrupt table, so a good entry costs one read and no
+     * output, and count every read so a zero is a measured zero.
+     */
+    if (run->plane != cs->kvm_plane &&
+        trace_event_get_state_backends(TRACE_HYPERV_VSM_PLANE_ENTRY_NULL)) {
+        int prev_plane = run->plane;
+        struct kvm_dtable idt, gdt;
+        int rc;
+
+        rc = kvm_get_vcpu_dtables(cs, &idt, &gdt);
+        entry_reads++;
+        if (rc < 0 || idt.limit == 0) {
+            CPUX86State *env = &X86_CPU(cs)->env;
+
+            entry_nulls++;
+            trace_hyperv_vsm_plane_entry_null(hyperv_vp_index(cs),
+                                              cs->kvm_plane, prev_plane, rc,
+                                              env->idt.base, env->idt.limit,
+                                              idt.base, idt.limit,
+                                              gdt.base, gdt.limit);
+        }
+        if (!(entry_reads % 4096)) {
+            trace_hyperv_vsm_plane_entry_census(hyperv_vp_index(cs),
+                                                cs->kvm_plane, entry_reads,
+                                                entry_nulls, idt.base,
+                                                idt.limit, gdt.base,
+                                                gdt.limit);
+        }
     }
 }
 

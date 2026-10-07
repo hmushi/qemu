@@ -3843,7 +3843,7 @@ static int kvm_put_xcrs(X86CPU *cpu)
     return kvm_vcpu_ioctl(CPU(cpu), KVM_SET_XCRS, &xcrs);
 }
 
-static int kvm_put_sregs(X86CPU *cpu)
+static int kvm_put_sregs(X86CPU *cpu, KvmPutState level)
 {
     CPUX86State *env = &cpu->env;
     struct kvm_sregs sregs;
@@ -3890,10 +3890,19 @@ static int kvm_put_sregs(X86CPU *cpu)
 
     sregs.efer = env->efer;
 
+    /*
+     * From the struct the ioctl gets: a put traced from a separate read of
+     * the cache can certify a value it never sent.
+     */
+    trace_hyperv_vsm_plane_put_sregs("sregs", hyperv_vp_index(CPU(cpu)),
+                                     CPU(cpu)->kvm_plane, level,
+                                     CPU(cpu)->kvm_fd, sregs.idt.base,
+                                     sregs.idt.limit, sregs.gdt.base,
+                                     sregs.gdt.limit);
     return kvm_vcpu_ioctl(CPU(cpu), KVM_SET_SREGS, &sregs);
 }
 
-static int kvm_put_sregs2(X86CPU *cpu)
+static int kvm_put_sregs2(X86CPU *cpu, KvmPutState level)
 {
     CPUX86State *env = &cpu->env;
     struct kvm_sregs2 sregs;
@@ -3944,7 +3953,40 @@ static int kvm_put_sregs2(X86CPU *cpu)
         sregs.flags |= KVM_SREGS2_FLAGS_PDPTRS_VALID;
     }
 
+    trace_hyperv_vsm_plane_put_sregs("sregs2", hyperv_vp_index(CPU(cpu)),
+                                     CPU(cpu)->kvm_plane, level,
+                                     CPU(cpu)->kvm_fd, sregs.idt.base,
+                                     sregs.idt.limit, sregs.gdt.base,
+                                     sregs.gdt.limit);
     return kvm_vcpu_ioctl(CPU(cpu), KVM_SET_SREGS2, &sregs);
+}
+
+/*
+ * @cpu's descriptor tables as KVM holds them, read without touching env: the
+ * cached file must stay the value the next put sends.
+ */
+int kvm_get_vcpu_dtables(CPUState *cpu, struct kvm_dtable *idt,
+                         struct kvm_dtable *gdt)
+{
+    struct kvm_sregs2 sregs2;
+    struct kvm_sregs sregs;
+    int ret;
+
+    if (has_sregs2) {
+        ret = kvm_vcpu_ioctl(cpu, KVM_GET_SREGS2, &sregs2);
+        *idt = sregs2.idt;
+        *gdt = sregs2.gdt;
+    } else {
+        ret = kvm_vcpu_ioctl(cpu, KVM_GET_SREGS, &sregs);
+        *idt = sregs.idt;
+        *gdt = sregs.gdt;
+    }
+    /* a failed read must not print as a null table: that is the signature */
+    if (ret < 0) {
+        idt->base = gdt->base = UINT64_MAX;
+        idt->limit = gdt->limit = UINT16_MAX;
+    }
+    return ret;
 }
 
 
@@ -5896,7 +5938,8 @@ int kvm_arch_put_registers(CPUState *cpu, KvmPutState level, Error **errp)
     }
 
     /* must be before kvm_put_nested_state so that EFER.SVME is set */
-    ret = has_sregs2 ? kvm_put_sregs2(x86_cpu) : kvm_put_sregs(x86_cpu);
+    ret = has_sregs2 ? kvm_put_sregs2(x86_cpu, level)
+                     : kvm_put_sregs(x86_cpu, level);
     if (ret < 0) {
         error_setg_errno(errp, -ret, "Failed to set special registers");
         return ret;

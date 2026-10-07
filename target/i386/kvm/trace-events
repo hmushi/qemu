@@ -52,3 +52,8 @@ hyperv_vsm_plane_vtl_event(uint32_t vp_index, int vtl, uint32_t cause, uint32_t 
 hyperv_vsm_plane_desc_state(const char *phase, uint32_t vp_index, int vtl, int dirty, uint64_t idt_base, uint32_t idt_limit, uint64_t gdt_base, uint32_t gdt_limit) "%s VP %u VTL%d dirty %d idt 0x%" PRIx64 "/0x%x gdt 0x%" PRIx64 "/0x%x"
 hyperv_vsm_plane_run_vtl(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"
 hyperv_vsm_vp_register_hcall_reject(const char *why, uint16_t rep_cnt, uint16_t rep_idx, bool fast, bool set, uint32_t caller_vp, int caller_vtl, uint64_t status) "rejected: %s rep_cnt %u rep_idx %u fast %d set %d caller VP %u VTL%d status 0x%" PRIx64
+hyperv_vsm_plane_entry_null(uint32_t vp_index, int plane, int prev_plane, int rc, uint64_t cached_idt_base, uint32_t cached_idt_limit, uint64_t idt_base, uint32_t idt_limit, uint64_t gdt_base, uint32_t gdt_limit) "VP %u VTL%d from VTL%d rc %d ours idt 0x%" PRIx64 "/0x%x kernel idt 0x%" PRIx64 "/0x%x kernel gdt 0x%" PRIx64 "/0x%x"
+hyperv_vsm_plane_entry_census(uint32_t vp_index, int plane, uint64_t reads, uint64_t nulls, uint64_t idt_base, uint32_t idt_limit, uint64_t gdt_base, uint32_t gdt_limit) "VP %u VTL%d reads %" PRIu64 " nulls %" PRIu64 " kernel idt 0x%" PRIx64 "/0x%x gdt 0x%" PRIx64 "/0x%x"
+
+# kvm.c
+hyperv_vsm_plane_put_sregs(const char *variant, uint32_t vp_index, int plane, int level, int fd, uint64_t idt_base, uint32_t idt_limit, uint64_t gdt_base, uint32_t gdt_limit) "%s VP %u VTL%d level %d fd %d idt 0x%" PRIx64 "/0x%x gdt 0x%" PRIx64 "/0x%x"
