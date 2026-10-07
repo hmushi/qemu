@@ -48,6 +48,7 @@ vm_state_notify(int running, int reason, const char *reason_str) "running %d rea
 runstate_set(int current_state, const char *current_state_str, int new_state, const char *new_state_str) "current_run_state %d (%s) new_state %d (%s)"
 system_wakeup_request(int reason) "reason=%d"
 qemu_system_shutdown_request(int reason) "reason=%d"
+qemu_system_reset_request(const char *reason) "reason=%s"
 qemu_system_powerdown_request(void) ""
 
 #dirtylimit.c

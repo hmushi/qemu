@@ -3713,6 +3713,7 @@ int kvm_cpu_exec(CPUState *cpu)
             ret = EXCP_INTERRUPT;
             break;
         case KVM_EXIT_SHUTDOWN:
+            trace_kvm_run_exit_shutdown(cpu->cpu_index, cpu->kvm_plane);
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             ret = EXCP_INTERRUPT;
             break;

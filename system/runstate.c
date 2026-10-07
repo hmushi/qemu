@@ -890,6 +890,8 @@ void qemu_system_guest_pvshutdown(void)
 
 void qemu_system_reset_request(ShutdownCause reason)
 {
+    trace_qemu_system_reset_request(ShutdownCause_str(reason));
+
     if (reboot_action == REBOOT_ACTION_SHUTDOWN &&
         reason != SHUTDOWN_CAUSE_SUBSYSTEM_RESET) {
         shutdown_requested = reason;
