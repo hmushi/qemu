@@ -51,7 +51,7 @@ static struct {
         .enabled_vtl_set = BIT(0),
         .maximum_vtl = HV_NUM_VTLS - 1,
     },
-    .capabilities = { .dr6_shared = 0 },
+    .capabilities = { .dr6_shared = 1 },
 };
 
 /* Per-VP, per-VTL state (child "vp-vsm" of the CPUState of that VTL) */
