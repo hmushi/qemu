@@ -1698,8 +1698,8 @@ void hyperv_vsm_dump_protections(CPUState *cs)
             denied++;
         }
     }
-    qemu_log("hyperv-vsm: VTL%d protections: %u entries, %u with no access\n",
-             vtl, total, denied);
+    qemu_log("hyperv-vsm: VTL%d protections: %u entries, %u with no access"
+             " (exiting plane, synchronised read)\n", vtl, total, denied);
 
     /*
      * KVM_EXIT_SHUTDOWN carries no address, so the faulting page cannot be
@@ -1716,6 +1716,13 @@ void hyperv_vsm_dump_protections(CPUState *cs)
              g_hash_table_contains(prots, GUINT_TO_POINTER(cr3_gfn)) &&
              prot_is_no_access(GPOINTER_TO_UINT(g_hash_table_lookup(prots,
                  GUINT_TO_POINTER(cr3_gfn)))) ? "YES" : "no");
+    /*
+     * Every field above and below comes from the exiting plane's own
+     * synchronised read. Judge it by idt.limit: a kernel base with a small
+     * limit is the state at the fault, base 0 with 0xffff is a serviced
+     * reset, base 0 with limit 0 is an unfilled struct and not a guest
+     * value. In the last case distrust this whole block.
+     */
     qemu_log("hyperv-vsm: idtr base=0x%" PRIx64 " limit=0x%x, gdtr base=0x%"
              PRIx64 " limit=0x%x (linear, not translated here)\n",
              (uint64_t)env->idt.base, env->idt.limit,
