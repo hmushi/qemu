@@ -326,6 +326,11 @@ static void clear_vp_assist_work(CPUState *cs, run_on_cpu_data arg)
     kvm_put_hv_vp_assist(X86_CPU(cs), 0);
 }
 
+static void clear_vina_work(CPUState *cs, run_on_cpu_data arg)
+{
+    set_vina(cs, 0);
+}
+
 static void hyperv_vsm_reset(void *opaque)
 {
     CPUState *cs;
@@ -346,7 +351,7 @@ static void hyperv_vsm_reset(void *opaque)
             vpvsm->intercept_route = NULL;
         }
         memset(vpvsm->vtl_config, 0, sizeof(vpvsm->vtl_config));
-        set_vina(cs, 0);
+        run_on_cpu(cs, clear_vina_work, RUN_ON_CPU_NULL);
         vpvsm->vp_status.as_uint64 = 0;
         vpvsm->vp_status.enabled_vtl_set = BIT(0);
         vpvsm->vp_status.active_vtl = active_vtl(cs);
