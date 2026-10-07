@@ -1431,7 +1431,8 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
 
     trace_hyperv_vsm_hcall_get_set_vp_registers(input.partition_id,
                                                 input.vp_index, vtl,
-                                                active_vtl(cs), nregs, set);
+                                                active_vtl(cs), nregs, set,
+                                                hyperv_vp_index(cs));
 
     bql_lock();
     cpu_synchronize_state(target_vcpu);
