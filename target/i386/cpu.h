@@ -2560,6 +2560,13 @@ struct ArchCPU {
      */
     uint32_t hv_plane_entry_probe_due;
 
+    /*
+     * A descriptor put reached this plane's descriptor and no entry has
+     * read the tables back since. Set where the put is traced, cleared by
+     * the entry probe, both on this plane's own thread.
+     */
+    bool hv_plane_entry_probe_put;
+
     bool xen_vapic;
 };
 

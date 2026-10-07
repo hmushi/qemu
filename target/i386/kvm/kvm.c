@@ -3899,6 +3899,8 @@ static int kvm_put_sregs(X86CPU *cpu, KvmPutState level)
                                      CPU(cpu)->kvm_fd, sregs.idt.base,
                                      sregs.idt.limit, sregs.gdt.base,
                                      sregs.gdt.limit);
+    /* the entry probe reads this plane's tables back after a put */
+    cpu->hv_plane_entry_probe_put = true;
     return kvm_vcpu_ioctl(CPU(cpu), KVM_SET_SREGS, &sregs);
 }
 
@@ -3958,6 +3960,7 @@ static int kvm_put_sregs2(X86CPU *cpu, KvmPutState level)
                                      CPU(cpu)->kvm_fd, sregs.idt.base,
                                      sregs.idt.limit, sregs.gdt.base,
                                      sregs.gdt.limit);
+    cpu->hv_plane_entry_probe_put = true;
     return kvm_vcpu_ioctl(CPU(cpu), KVM_SET_SREGS2, &sregs);
 }
 

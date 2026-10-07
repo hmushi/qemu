@@ -410,62 +410,100 @@ void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
      * the entered state holds rather than what we hold. Read it back here,
      * the last point before KVM_RUN.
      *
-     * Two entries qualify. One whose plane differs from the plane the
-     * shared page last ran, which is a switch return. And the entries
-     * after a VINA notification, which keeps the plane and so is not a
-     * switch return: the gate alone would never read those, and the faults
-     * correlate with them.
+     * Three gates qualify an entry, and the trace names the ones that
+     * fired so the populations stay separable. A switch return: the plane
+     * differs from the plane the shared page last ran. A notified entry:
+     * a VINA notification keeps the plane, so the entries after it are not
+     * switch returns and a countdown covers them. A put entry: a
+     * descriptor put reached this plane since its last probe, and the
+     * fault follows such a put, so this gate covers the put-to-entry
+     * window on every occurrence, however long the notified window runs.
      *
      * Report only a null interrupt table, so a good entry costs one read
      * and no output, and count every read so a zero is a measured zero.
      */
     if (trace_event_get_state_backends(TRACE_HYPERV_VSM_PLANE_ENTRY_NULL)) {
+        static const char *const gate_name[] = {
+            "none", "switch", "notify", "switch+notify",
+            "put", "switch+put", "notify+put", "switch+notify+put",
+        };
+        enum { GATE_SWITCH = 1, GATE_NOTIFY = 2, GATE_PUT = 4 };
         CPUState *leader = cs->kvm_plane_leader ? cs->kvm_plane_leader : cs;
-        bool after_notify = X86_CPU(leader)->hv_plane_entry_probe_due > 0;
+        X86CPU *cpu = X86_CPU(cs);
+        unsigned gate = 0;
 
-        if (run->plane != cs->kvm_plane || after_notify) {
-            X86CPU *cpu = X86_CPU(cs);
+        if (run->plane != cs->kvm_plane) {
+            gate |= GATE_SWITCH;
+        }
+        if (X86_CPU(leader)->hv_plane_entry_probe_due > 0) {
+            gate |= GATE_NOTIFY;
+        }
+        if (cpu->hv_plane_entry_probe_put) {
+            gate |= GATE_PUT;
+        }
+        cpu->hv_plane_entry_probe_put = false;
+
+        if (gate) {
             int prev_plane = run->plane;
             struct kvm_dtable idt, gdt;
+            bool null;
             int rc;
 
             /*
-             * A switch return is probed by the gate above, so spending a
+             * A switch return is probed by its own gate, so spending a
              * tick on it buys nothing and costs coverage: the faults sit
              * well after the notification, and interleaved switch returns
              * would exhaust the count before the probe reaches them.
              */
-            if (after_notify && run->plane == cs->kvm_plane) {
+            if ((gate & GATE_NOTIFY) && !(gate & GATE_SWITCH)) {
                 X86_CPU(leader)->hv_plane_entry_probe_due--;
             }
             rc = kvm_get_vcpu_dtables(cs, &idt, &gdt);
             cpu->hv_plane_entry_reads++;
-            if (rc < 0 || idt.limit == 0) {
+            null = rc < 0 || idt.limit == 0;
+            if (null) {
+                cpu->hv_plane_entry_nulls++;
+            }
+            /*
+             * The null event has never fired on any boot, so every zero it
+             * has reported is an unexercised branch. Fire it once on the
+             * first probe of each processor and plane whatever it read,
+             * with rc 1 as the mark: a real read returns 0 or -errno, so
+             * the mark cannot collide with a real null.
+             */
+            if (null || cpu->hv_plane_entry_reads == 1) {
                 CPUX86State *env = &cpu->env;
 
-                cpu->hv_plane_entry_nulls++;
                 trace_hyperv_vsm_plane_entry_null(hyperv_vp_index(cs),
                                                   cs->kvm_plane, prev_plane,
-                                                  rc, env->idt.base,
+                                                  null ? rc : 1,
+                                                  env->idt.base,
                                                   env->idt.limit, idt.base,
                                                   idt.limit, gdt.base,
                                                   gdt.limit);
             }
             /*
-             * Every post-notification entry prints, so the value is shown
-             * rather than counted. Otherwise the first entries of every
-             * processor and plane, then one in 16: a processor that takes a
-             * hundred of the boot's seventy thousand switch returns never
-             * reaches a shared period.
+             * The census line names the gate, and the null line is at the
+             * trace tool's argument limit, so a null always prints its
+             * census line too. Every entry the switch gate cannot see
+             * prints, so the value is shown rather than counted. A switch
+             * return prints on the first entries of every processor and
+             * plane, then one in 16: a processor that takes a hundred of
+             * the boot's seventy thousand switch returns never reaches a
+             * shared period. Most switch returns follow a put, so a put
+             * entry that is also a switch return keeps the period or the
+             * census would print on every return.
              */
-            if (after_notify || cpu->hv_plane_entry_reads <= 8 ||
+            if (null || (gate & GATE_NOTIFY) || gate == GATE_PUT ||
+                cpu->hv_plane_entry_reads <= 8 ||
                 !(cpu->hv_plane_entry_reads % 16)) {
                 trace_hyperv_vsm_plane_entry_census(hyperv_vp_index(cs),
                                                     cs->kvm_plane,
                                                     cpu->hv_plane_entry_reads,
                                                     cpu->hv_plane_entry_nulls,
                                                     idt.base, idt.limit,
-                                                    gdt.base, gdt.limit);
+                                                    gdt.base, gdt.limit,
+                                                    gate_name[gate]);
             }
         }
     }
