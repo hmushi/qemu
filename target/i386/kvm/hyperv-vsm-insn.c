@@ -253,6 +253,9 @@ int hyperv_vsm_insn_len(const uint8_t *buf, int len, int mode)
 
     if (mode == 64 && op >= 0x40 && op <= 0x4f) {
         d.rex_w = op & 8;
+        if (d.rex_w) {
+            d.opsize16 = false;         /* REX.W wins over a 66 prefix */
+        }
         op = next(&d);
         if (op < 0) {
             return 0;

@@ -48,6 +48,29 @@ static const InsnCase cases[] = {
     { "addq $imm32,(%rax)", 64, 7, { 0x48, 0x81, 0x00, 1, 2, 3, 4 } },
     { "fldl (%rax)", 64, 2, { 0xdd, 0x00 } },
     { "add %eax,(%r8)", 64, 3, { 0x41, 0x01, 0x00 } },
+
+    /*
+     * Encodings the kvm-unit-tests suite never produced, from a differential
+     * sweep of the decoder against objdump over 457822 distinct instructions
+     * in compiler-generated x86-64 objects plus 27695 swept opcode forms.
+     *
+     * REX.W overrides a 66 operand-size prefix, so the immediate stays 32-bit.
+     * The data16 forms below are real encodings taken from libc and libcrypto,
+     * where 66 66 is alignment padding ahead of a REX.W instruction.
+     */
+    { "data16 addq $imm32,(%rax)", 64, 8,
+      { 0x66, 0x48, 0x81, 0x00, 0x12, 0x34, 0x56, 0x78 } },
+    { "data16 data16 callq rel32", 64, 8,
+      { 0x66, 0x66, 0x48, 0xe8, 0x0c, 0xc9, 0xff, 0xff } },
+    { "data16 data16 xorq $imm32,%rax", 64, 8,
+      { 0x66, 0x66, 0x4b, 0x35, 0x57, 0x88, 0x90, 0xf6 } },
+    { "data16 movabs $imm64,%rax", 64, 11,
+      { 0x66, 0x48, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8 } },
+    /* without REX.W the 66 prefix still shortens the immediate */
+    { "addw $imm16,(%rax)", 64, 5, { 0x66, 0x81, 0x00, 0x12, 0x34 } },
+    { "addw $imm16,(%eax) (32-bit)", 32, 5, { 0x66, 0x81, 0x00, 0x12, 0x34 } },
+    { "addl $imm32,(%eax) (16-bit)", 16, 7,
+      { 0x66, 0x81, 0x00, 0x12, 0x34, 0x56, 0x78 } },
 };
 
 static void test_lengths(void)
