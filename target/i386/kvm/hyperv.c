@@ -12,6 +12,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
 #include "hyperv.h"
@@ -61,15 +62,6 @@ static void async_synic_update(CPUState *cs, run_on_cpu_data data)
     bql_lock();
     hyperv_x86_synic_update(X86_CPU(cs));
     bql_unlock();
-}
-
-static void kvm_hv_inject_ud(CPUState *c)
-{
-    X86CPU *cpu = X86_CPU(c);
-    CPUX86State *env = &cpu->env;
-
-    kvm_cpu_synchronize_state(c);
-    kvm_queue_exception(env, EXCP06_ILLOP, 0, 0, 0, 0);
 }
 
 int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
@@ -127,18 +119,24 @@ int kvm_hv_handle_exit(X86CPU *cpu, struct kvm_hyperv_exit *exit)
                 hyperv_hcall_vtl_enable_vp_vtl(CPU(cpu), in_param, fast);
             break;
         case HVCALL_VTL_CALL:
-        case HVCALL_VTL_RETURN:
-            /* no result: the switch hands RAX/RCX over through vtl_control */
-            exit->u.hcall.result = HV_STATUS_SUCCESS;
-            ret = code == HVCALL_VTL_CALL ? hyperv_hcall_vtl_call(CPU(cpu)) :
-                                            hyperv_hcall_vtl_return(CPU(cpu));
-            trace_hyperv_vsm_hcall_result(hyperv_vp_index(CPU(cpu)), code, ret);
+        case HVCALL_VTL_RETURN: {
+            uint64_t status = HV_STATUS_SUCCESS;
+
+            ret = code == HVCALL_VTL_CALL ?
+                      hyperv_hcall_vtl_call(CPU(cpu), &status) :
+                      hyperv_hcall_vtl_return(CPU(cpu), &status);
             if (ret < 0) {
-                /* not a VTL that may call or return: #UD, keep running */
-                kvm_hv_inject_ud(CPU(cpu));
-                return 0;
+                /* the switch itself failed, after its checks passed */
+                error_report("hyperv-vsm: VP %u cannot switch VTL: %s",
+                             hyperv_vp_index(CPU(cpu)), strerror(-ret));
+                status = HV_STATUS_INVALID_VP_STATE;
+                ret = 0;
             }
+            trace_hyperv_vsm_hcall_result(hyperv_vp_index(CPU(cpu)), code,
+                                          status);
+            exit->u.hcall.result = status;
             return ret;
+        }
         case HVCALL_GET_VP_REGISTERS:
             exit->u.hcall.result =
                 hyperv_hcall_get_set_vp_register(CPU(cpu), exit, false);

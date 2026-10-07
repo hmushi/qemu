@@ -1045,38 +1045,49 @@ static void set_tlb_flush_inhibit(CPUState *vtl0, bool inhibit)
     }
 }
 
-int hyperv_hcall_vtl_call(CPUState *cs)
+int hyperv_hcall_vtl_call(CPUState *cs, uint64_t *status)
 {
     int vtl = active_vtl(cs);
 
     trace_hyperv_vsm_hcall_vtl_call(hyperv_vp_index(cs), vtl);
 
-    /* VTL0 <-> VTL1 only */
-    if (vtl != 0 || !sibling(cs, 1)) {
-        return -EINVAL;
+    /* TLFS 15.5.7: only a VP's lowest VTL may call up */
+    if (vtl != 0) {
+        *status = HV_STATUS_ACCESS_DENIED;
+        return 0;
+    }
+    /* the VTL to enter is not enabled on this VP */
+    if (!sibling(cs, 1)) {
+        *status = HV_STATUS_INVALID_VP_STATE;
+        return 0;
     }
     trace_vtl1_synic_once(sibling(cs, 1));
 
+    *status = HV_STATUS_SUCCESS;
     return hv_plane_run_vtl(cs, 1, HV_PLANE_SWITCH_VTL_CALL);
 }
 
-int hyperv_hcall_vtl_return(CPUState *cs)
+int hyperv_hcall_vtl_return(CPUState *cs, uint64_t *status)
 {
     int vtl = active_vtl(cs);
     CPUState *vtl0;
 
     trace_hyperv_vsm_hcall_vtl_return(hyperv_vp_index(cs), vtl);
 
+    /* TLFS 15.5.8: a VP's lowest VTL has nowhere to return to */
     if (vtl != 1) {
-        return -EINVAL;
+        *status = HV_STATUS_ACCESS_DENIED;
+        return 0;
     }
 
     vtl0 = sibling(cs, 0);
     if (!vtl0) {
-        return -EINVAL;
+        *status = HV_STATUS_INVALID_VP_STATE;
+        return 0;
     }
     set_tlb_flush_inhibit(vtl0, false);
 
+    *status = HV_STATUS_SUCCESS;
     return hv_plane_run_vtl(cs, 0, HV_PLANE_SWITCH_VTL_RETURN);
 }
 

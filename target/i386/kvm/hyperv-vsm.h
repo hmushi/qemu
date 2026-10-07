@@ -24,8 +24,12 @@ uint16_t hyperv_hcall_vtl_enable_partition_vtl(CPUState *cs, uint64_t param1,
                                                uint64_t param2, bool fast);
 uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param,
                                         bool fast);
-int hyperv_hcall_vtl_call(CPUState *cs);
-int hyperv_hcall_vtl_return(CPUState *cs);
+/*
+ * A VTL switch has no result of its own: it hands RAX and RCX over through
+ * the VTL control page. @status carries a refusal instead.
+ */
+int hyperv_hcall_vtl_call(CPUState *cs, uint64_t *status);
+int hyperv_hcall_vtl_return(CPUState *cs, uint64_t *status);
 uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
                                           struct kvm_hyperv_exit *exit,
                                           bool set);
