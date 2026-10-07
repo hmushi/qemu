@@ -429,7 +429,13 @@ void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
             struct kvm_dtable idt, gdt;
             int rc;
 
-            if (after_notify) {
+            /*
+             * A switch return is probed by the gate above, so spending a
+             * tick on it buys nothing and costs coverage: the faults sit
+             * well after the notification, and interleaved switch returns
+             * would exhaust the count before the probe reaches them.
+             */
+            if (after_notify && run->plane == cs->kvm_plane) {
                 X86_CPU(leader)->hv_plane_entry_probe_due--;
             }
             rc = kvm_get_vcpu_dtables(cs, &idt, &gdt);
