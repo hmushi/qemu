@@ -204,7 +204,13 @@ static bool decode_vex_opcode(InsnDecoder *d, int map)
 {
     int op = next(d);
 
-    if (op < 0 || !modrm(d)) {
+    if (op < 0) {
+        return false;
+    }
+    if (map == 1 && op == 0x77) {
+        return true;                            /* VZEROUPPER/VZEROALL */
+    }
+    if (!modrm(d)) {
         return false;
     }
     if (map == 3 || map >= 8) {                 /* 0F 3A and XOP maps: imm8 */

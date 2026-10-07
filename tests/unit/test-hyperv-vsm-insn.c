@@ -71,6 +71,18 @@ static const InsnCase cases[] = {
     { "addw $imm16,(%eax) (32-bit)", 32, 5, { 0x66, 0x81, 0x00, 0x12, 0x34 } },
     { "addl $imm32,(%eax) (16-bit)", 16, 7,
       { 0x66, 0x81, 0x00, 0x12, 0x34, 0x56, 0x78 } },
+
+    /*
+     * VEX 0F 77 is VZEROUPPER or VZEROALL and takes no ModRM byte. It is the
+     * only opcode in the VEX 0F map without one, and AVX code emits it often.
+     */
+    { "vzeroupper (2-byte VEX)", 64, 3, { 0xc5, 0xf8, 0x77 } },
+    { "vzeroall (2-byte VEX)", 64, 3, { 0xc5, 0xfc, 0x77 } },
+    { "vzeroupper (3-byte VEX)", 64, 4, { 0xc4, 0xe1, 0x78, 0x77 } },
+    { "vzeroall (3-byte VEX)", 64, 4, { 0xc4, 0xe1, 0x7c, 0x77 } },
+    /* the neighbouring map-1 opcodes still take one */
+    { "vpcmpeqw (%rax),%ymm0,%ymm0", 64, 4, { 0xc5, 0xfd, 0x75, 0x00 } },
+    { "vmovntdq %ymm0,(%rax)", 64, 4, { 0xc5, 0xfd, 0xe7, 0x00 } },
 };
 
 static void test_lengths(void)
