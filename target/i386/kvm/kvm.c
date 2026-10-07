@@ -193,8 +193,6 @@ static KVMMSRHandlers msr_handlers[KVM_MSR_FILTER_MAX_RANGES];
 
 #define BUS_LOCK_SLICE_TIME 1000000000ULL /* ns */
 static RateLimit bus_lock_ratelimit_ctrl;
-static int kvm_get_one_msr(X86CPU *cpu, int index, uint64_t *value);
-
 static const char *vm_type_name[] = {
     [KVM_X86_DEFAULT_VM] = "default",
     [KVM_X86_SEV_VM] = "SEV",
@@ -4020,7 +4018,7 @@ int kvm_put_one_msr(X86CPU *cpu, int index, uint64_t value)
     return kvm_vcpu_ioctl(CPU(cpu), KVM_SET_MSRS, cpu->kvm_msr_buf);
 }
 
-static int kvm_get_one_msr(X86CPU *cpu, int index, uint64_t *value)
+int kvm_get_one_msr(X86CPU *cpu, int index, uint64_t *value)
 {
     int ret;
     struct {

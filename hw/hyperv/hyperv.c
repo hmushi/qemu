@@ -28,6 +28,7 @@
 #include "hw/hyperv/vsm-plane-api.h"
 #include "qom/object.h"
 #include "target/i386/kvm/hyperv-proto.h"
+#include "trace.h"
 
 struct SynICState {
     DeviceState parent_obj;
@@ -66,10 +67,16 @@ bool hyperv_is_synic_present(CPUState *cs)
     return get_synic(cs);
 }
 
+static void synic_arm_routes(SynICState *synic);
+
+static bool synic_can_deliver(SynICState *synic)
+{
+    return synic->sctl_enabled || synic->msg_page_addr;
+}
+
 static void synic_update(SynICState *synic, bool sctl_enable,
                          hwaddr msg_page_addr, hwaddr event_page_addr)
 {
-
     synic->sctl_enabled = sctl_enable;
     if (synic->msg_page_addr != msg_page_addr) {
         if (synic->msg_page_addr) {
@@ -81,6 +88,13 @@ static void synic_update(SynICState *synic, bool sctl_enable,
                                         &synic->msg_page_mr);
         }
         synic->msg_page_addr = msg_page_addr;
+    }
+    /*
+     * A SINT message is delivered whenever the page is enabled and the SINT
+     * unmasked; SCONTROL.Enable is not consulted, and the guest relies on it.
+     */
+    if (synic_can_deliver(synic)) {
+        synic_arm_routes(synic);
     }
     if (synic->event_page_addr != event_page_addr) {
         if (synic->event_page_addr) {
@@ -227,6 +241,8 @@ typedef struct HvSintStagedMessage {
 
 struct HvSintRoute {
     uint32_t sint;
+    uint32_t vp_index;
+    uint8_t vtl;
     SynICState *synic;
     int gsi;
     bool gsi_valid;
@@ -409,12 +425,60 @@ static int kvm_irqchip_add_hv_sint_route(KVMState *s, uint32_t vcpu,
     return virq;
 }
 
+/* Give @sint_route a GSI so set_sint reaches the guest; the SynIC must be on */
+static int sint_route_arm(HvSintRoute *sint_route)
+{
+    KVMState *s = hv_plane_kvm_state(sint_route->synic->cs);
+    EventNotifier *ack = sint_route->staged_msg ?
+                         &sint_route->sint_ack_notifier : NULL;
+    int gsi, r;
+
+    if (sint_route->gsi_valid) {
+        return 0;
+    }
+    r = event_notifier_init(&sint_route->sint_set_notifier, false);
+    if (r < 0) {
+        return r;
+    }
+    /* one routing table for all planes; the entry names the plane */
+    gsi = kvm_irqchip_add_hv_sint_route(s, sint_route->vp_index,
+                                        sint_route->sint, sint_route->vtl);
+    if (gsi < 0) {
+        event_notifier_cleanup(&sint_route->sint_set_notifier);
+        return gsi;
+    }
+    r = kvm_irqchip_add_irqfd_notifier_gsi(s, &sint_route->sint_set_notifier,
+                                           ack, gsi);
+    if (r) {
+        kvm_irqchip_release_virq(s, gsi);
+        event_notifier_cleanup(&sint_route->sint_set_notifier);
+        return r;
+    }
+    sint_route->gsi = gsi;
+    sint_route->gsi_valid = true;
+    trace_hyperv_vsm_sint_route_armed(sint_route->vp_index, sint_route->vtl,
+                                  sint_route->sint, gsi);
+    return 0;
+}
+
+/* routes made before the guest enabled its SynIC get their GSI now */
+static void synic_arm_routes(SynICState *synic)
+{
+    HvSintRoute *sint_route;
+
+    qemu_mutex_lock(&synic->sint_routes_mutex);
+    QLIST_FOREACH(sint_route, &synic->sint_routes, link) {
+        sint_route_arm(sint_route);
+    }
+    qemu_mutex_unlock(&synic->sint_routes_mutex);
+}
+
 HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint,
                                    HvSintMsgCb cb, void *cb_data)
 {
     HvSintRoute *sint_route = NULL;
     EventNotifier *ack_notifier = NULL;
-    int r, gsi;
+    int r;
     CPUState *cs;
     SynICState *synic;
     bool ack_event_initialized = false;
@@ -436,6 +500,8 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint
 
     sint_route->synic = synic;
     sint_route->sint = sint;
+    sint_route->vp_index = vp_index;
+    sint_route->vtl = vtl;
     sint_route->refcount = 1;
 
     ack_notifier = cb ? &sint_route->sint_ack_notifier : NULL;
@@ -455,43 +521,14 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint
         ack_event_initialized = true;
     }
 
-    /* See if we are done or we need to setup a GSI for this SintRoute */
-    if (!synic->sctl_enabled) {
-        goto cleanup;
-    }
-
-    /* We need to setup a GSI for this SintRoute */
-    r = event_notifier_init(&sint_route->sint_set_notifier, false);
-    if (r < 0) {
+    /* a route made before the SynIC can deliver gets its GSI when it can */
+    if (synic_can_deliver(synic) && sint_route_arm(sint_route) < 0) {
         goto cleanup_err_sint;
     }
-
-    /* one routing table for all planes; the entry names the plane */
-    gsi = kvm_irqchip_add_hv_sint_route(hv_plane_kvm_state(cs), vp_index, sint,
-                                        vtl);
-    if (gsi < 0) {
-        goto cleanup_err_sint_notifier;
-    }
-
-    r = kvm_irqchip_add_irqfd_notifier_gsi(hv_plane_kvm_state(cs),
-                                           &sint_route->sint_set_notifier,
-                                           ack_notifier, gsi);
-    if (r) {
-        goto cleanup_err_irqfd;
-    }
-    sint_route->gsi = gsi;
-    sint_route->gsi_valid = true;
-cleanup:
     qemu_mutex_lock(&synic->sint_routes_mutex);
     QLIST_INSERT_HEAD(&synic->sint_routes, sint_route, link);
     qemu_mutex_unlock(&synic->sint_routes_mutex);
     return sint_route;
-
-cleanup_err_irqfd:
-    kvm_irqchip_release_virq(hv_plane_kvm_state(cs), gsi);
-
-cleanup_err_sint_notifier:
-    event_notifier_cleanup(&sint_route->sint_set_notifier);
 
 cleanup_err_sint:
     if (ack_notifier) {
@@ -546,6 +583,11 @@ void hyperv_sint_route_unref(HvSintRoute *sint_route)
         g_free(sint_route->staged_msg);
     }
     g_free(sint_route);
+}
+
+bool hyperv_sint_route_armed(HvSintRoute *sint_route)
+{
+    return sint_route->gsi_valid;
 }
 
 int hyperv_sint_route_set_sint(HvSintRoute *sint_route)

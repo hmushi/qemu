@@ -2,8 +2,10 @@
 
 hyperv_vsm_desc_load_arm(uint32_t vp_index, int vtl, uint64_t control, uint32_t mask, uint32_t supported) "VP %u VTL%d control 0x%" PRIx64 " loads 0x%x kernel 0x%x"
 hyperv_vsm_desc_load_intercept(uint32_t vp_index, int vtl, uint32_t reg, int memory_op, uint64_t gva, uint64_t base, uint64_t limit, uint64_t rip, unsigned len) "VP %u VTL%d reg 0x%x memop %d gva 0x%" PRIx64 " base 0x%" PRIx64 " limit 0x%" PRIx64 " rip 0x%" PRIx64 " len %u"
+hyperv_vsm_intercept_delivery(uint32_t vp_index, int vtl, uint32_t type, bool armed, uint64_t sctl, uint64_t simp, uint64_t sint0) "to VP %u VTL%d type 0x%x route-armed %d sctl 0x%" PRIx64 " simp 0x%" PRIx64 " sint0 0x%" PRIx64
 hyperv_vsm_intercept_header(uint32_t vp_index, int vtl, uint64_t rip, uint16_t cs_sel, uint64_t cs_base, uint16_t exec_state, unsigned len) "VP %u VTL%d rip 0x%" PRIx64 " cs 0x%x base 0x%" PRIx64 " exec_state 0x%x len %u"
 hyperv_vsm_intercept_not_posted(uint32_t vp_index, int vtl, uint32_t type, uint64_t count) "VP %u VTL%d type 0x%x previous message unacknowledged, %" PRIu64 " in a row"
+hyperv_vsm_vtl1_synic(uint32_t vp_index, uint64_t sctl, uint64_t simp, uint64_t sint0) "VP %u VTL1 sctl 0x%" PRIx64 " simp 0x%" PRIx64 " sint0 0x%" PRIx64
 # kvm.c
 kvm_x86_fixup_msi_error(uint32_t gsi) "VT-d failed to remap interrupt for GSI %" PRIu32
 kvm_x86_add_msi_route(int virq) "Adding route entry for virq %d"

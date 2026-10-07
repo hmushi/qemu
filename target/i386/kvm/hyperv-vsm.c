@@ -76,10 +76,13 @@ struct VpVsmState {
     uint64_t cr_intercept_misc_enable_mask;
     /* intercepts posted while the previous one was unacknowledged, in a row */
     uint64_t intercepts_unposted;
+    /* the target VTL's SynIC registers were traced once for this VP */
+    bool synic_traced;
 };
 
 /* the loads the kernel reports, from KVM_CAP_X86_DESC_LOAD_EXIT */
 static uint32_t desc_load_exit_mask;
+static void trace_vtl1_synic_once(CPUState *cs);
 
 /* KVM_CAP_X86_DESC_LOAD_EXIT mask for the loads @ctl intercepts */
 static uint32_t desc_load_exit_bits(union hv_register_cr_intercept_control ctl)
@@ -1019,6 +1022,7 @@ int hyperv_hcall_vtl_call(CPUState *cs)
     if (vtl != 0 || !sibling(cs, 1)) {
         return -EINVAL;
     }
+    trace_vtl1_synic_once(sibling(cs, 1));
 
     return hv_plane_run_vtl(cs, 1, HV_PLANE_SWITCH_VTL_CALL);
 }
@@ -2101,6 +2105,23 @@ static void intercept_cb(void *data, int status)
 }
 
 /* Post intercept @msg on SINT0 of @cs, the higher VTL vCPU of that VP */
+/* The SynIC registers of VTL1 vCPU @cs, once per VP, after it has run */
+static void trace_vtl1_synic_once(CPUState *cs)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+    uint64_t sctl = 0, simp = 0, sint0 = 0;
+
+    if (vpvsm->synic_traced ||
+        !trace_event_get_state_backends(TRACE_HYPERV_VSM_VTL1_SYNIC)) {
+        return;
+    }
+    vpvsm->synic_traced = true;
+    kvm_get_one_msr(X86_CPU(cs), HV_X64_MSR_SCONTROL, &sctl);
+    kvm_get_one_msr(X86_CPU(cs), HV_X64_MSR_SIMP, &simp);
+    kvm_get_one_msr(X86_CPU(cs), HV_X64_MSR_SINT0, &sint0);
+    trace_hyperv_vsm_vtl1_synic(hyperv_vp_index(cs), sctl, simp, sint0);
+}
+
 static int deliver_memory_intercept(CPUState *cs,
                                     const struct hyperv_message *msg)
 {
@@ -2117,6 +2138,24 @@ static int deliver_memory_intercept(CPUState *cs,
         error_report("hyperv-vsm: cannot create the intercept SINT route for "
                      "VP %u VTL%d", hyperv_vp_index(cs), active_vtl(cs));
         return -1;
+    }
+
+    /*
+     * A route gets a GSI only if the target SynIC was enabled when it was
+     * created, and a masked SINT drops the injection silently.
+     */
+    if (trace_event_get_state_backends(TRACE_HYPERV_VSM_INTERCEPT_DELIVERY)) {
+        X86CPU *cpu = X86_CPU(cs);
+        uint64_t sctl = 0, simp = 0, sint0 = 0;
+
+        kvm_get_one_msr(cpu, HV_X64_MSR_SCONTROL, &sctl);
+        kvm_get_one_msr(cpu, HV_X64_MSR_SIMP, &simp);
+        kvm_get_one_msr(cpu, HV_X64_MSR_SINT0, &sint0);
+        trace_hyperv_vsm_intercept_delivery(hyperv_vp_index(cs), active_vtl(cs),
+                                            msg->header.message_type,
+                                            hyperv_sint_route_armed(
+                                                vpvsm->intercept_route),
+                                            sctl, simp, sint0);
     }
 
     /*

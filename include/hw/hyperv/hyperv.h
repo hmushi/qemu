@@ -29,6 +29,8 @@ void hyperv_sint_route_ref(HvSintRoute *sint_route);
 void hyperv_sint_route_unref(HvSintRoute *sint_route);
 
 int hyperv_sint_route_set_sint(HvSintRoute *sint_route);
+/* whether the route got a GSI: the SynIC was enabled when it was created */
+bool hyperv_sint_route_armed(HvSintRoute *sint_route);
 
 /*
  * Submit a message to be posted in vcpu context.  If the submission succeeds,
