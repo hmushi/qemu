@@ -74,6 +74,8 @@ struct VpVsmState {
     uint64_t cr_intercept_cr0_mask;
     uint64_t cr_intercept_cr4_mask;
     uint64_t cr_intercept_misc_enable_mask;
+    /* intercepts posted while the previous one was unacknowledged, in a row */
+    uint64_t intercepts_unposted;
 };
 
 /* the loads the kernel reports, from KVM_CAP_X86_DESC_LOAD_EXIT */
@@ -2069,6 +2071,18 @@ static void build_memory_intercept(CPUState *cs, struct hyperv_message *msg,
                                       hdr->instruction_length);
 }
 
+/* the guest acknowledged the message that kept the slot busy: post again */
+static void intercept_repost_bh(void *data)
+{
+    VpVsmState *vpvsm = data;
+
+    if (hyperv_post_msg(vpvsm->intercept_route, &vpvsm->intercept_msg)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: VP %u VTL%d intercept "
+                      "message could not be reposted\n",
+                      hyperv_vp_index(vpvsm->cs), active_vtl(vpvsm->cs));
+    }
+}
+
 static void intercept_cb(void *data, int status)
 {
     VpVsmState *vpvsm = data;
@@ -2079,10 +2093,11 @@ static void intercept_cb(void *data, int status)
 
     assert(status == -EAGAIN);
 
-    /* the slot was busy; repost once the guest has acknowledged */
-    while (hyperv_post_msg(vpvsm->intercept_route, &vpvsm->intercept_msg)) {
-        sched_yield();
-    }
+    /*
+     * Called before the staging slot is marked free, so a post from here
+     * would fail. Repost from the main loop once this callback returns.
+     */
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), intercept_repost_bh, vpvsm);
 }
 
 /* Post intercept @msg on SINT0 of @cs, the higher VTL vCPU of that VP */
@@ -2104,8 +2119,35 @@ static int deliver_memory_intercept(CPUState *cs,
         return -1;
     }
 
-    while (hyperv_post_msg(vpvsm->intercept_route, &vpvsm->intercept_msg)) {
-        sched_yield();
+    /*
+     * The lower VTL is stopped at the intercepted instruction, so a message
+     * arriving on a busy slot repeats it: keep the one in flight.
+     */
+    if (hyperv_post_msg(vpvsm->intercept_route, &vpvsm->intercept_msg)) {
+        uint64_t n = ++vpvsm->intercepts_unposted;
+
+        /*
+         * A VTL that never completes an intercept re-faults forever. Report
+         * the first 64 and then powers of two.
+         */
+        if (n <= 64 || !(n & (n - 1))) {
+            qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: VP %u VTL%d has not "
+                          "acknowledged the previous intercept message; not "
+                          "posting type 0x%x again (%" PRIu64 " in a row)\n",
+                          hyperv_vp_index(cs), active_vtl(cs),
+                          msg->header.message_type, n);
+            trace_hyperv_vsm_intercept_not_posted(hyperv_vp_index(cs),
+                                                  active_vtl(cs),
+                                                  msg->header.message_type,
+                                                  n);
+        }
+        if (n == 64) {
+            warn_report("hyperv-vsm: VP %u VTL%d is not completing register "
+                        "intercepts; the lower VTL cannot make progress",
+                        hyperv_vp_index(cs), active_vtl(cs));
+        }
+    } else {
+        vpvsm->intercepts_unposted = 0;
     }
 
     return 0;
@@ -2216,11 +2258,17 @@ int kvm_hv_handle_desc_load(CPUState *cs, const struct kvm_plane_event_exit *ev)
         break;
     }
 
+    /* the header Windows parses, as bytes on the wire */
+    trace_hyperv_vsm_intercept_header(hdr->vp_index, vtl, hdr->rip,
+                                      hdr->cs_segment.selector,
+                                      hdr->cs_segment.base,
+                                      hdr->execution_state.as_uint16,
+                                      hdr->instruction_length);
     trace_hyperv_vsm_desc_load_intercept(hdr->vp_index, vtl, icpt->reg_name,
                                          !!(ev->extra[0] &
                                             KVM_DESC_LOAD_IS_MEMORY_OP),
-                                         ev->extra[3], ev->extra[2], hdr->rip,
-                                         len);
+                                         ev->extra[1], ev->extra[3],
+                                         ev->extra[2], hdr->rip, len);
 
     if (deliver_memory_intercept(next, &msg)) {
         return -1;
