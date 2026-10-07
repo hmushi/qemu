@@ -1233,8 +1233,9 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         env->cr[4] = val->low_part;
         break;
     case HV_X64_REGISTER_CR8:
+        /* the APIC holds this, so the register file is unchanged */
         cpu_set_apic_tpr(cpu->apic_state, val->low_part);
-        break;
+        return HV_STATUS_SUCCESS;
     case HV_X64_REGISTER_DR7:
         env->dr[7] = val->low_part;
         break;
@@ -1287,13 +1288,13 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         break;
     case HV_REGISTER_VSM_PARTITION_CONFIG:
         set_vsm_partition_config(active_vtl(target_vcpu), val->low_part);
-        break;
+        return HV_STATUS_SUCCESS;
     case HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0 ...
          HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL14:
         if (!set_vp_secure_vtl_config(target_vcpu, name, val->low_part)) {
             return HV_STATUS_INVALID_PARAMETER;
         }
-        break;
+        return HV_STATUS_SUCCESS;
     case HV_REGISTER_PENDING_EVENT0: {
         union hv_x64_pending_exception_event event = {
             .as_uint64[0] = val->low_part,
@@ -1301,13 +1302,13 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         };
 
         if (!event.event_pending) {
-            break;
+            return HV_STATUS_SUCCESS;
         }
 
         if (event.event_type != HV_X64_PENDING_EVENT_EXCEPTION) {
             qemu_log_mask(LOG_UNIMP, "hyperv-vsm: pending event type %d not "
                           "supported\n", event.event_type);
-            break;
+            return HV_STATUS_SUCCESS;
         }
 
         kvm_queue_exception(env, event.vector, event.deliver_error_code,
@@ -1320,7 +1321,7 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         break;
     case HV_REGISTER_VSM_VINA:
         set_vina(target_vcpu, val->low_part);
-        break;
+        return HV_STATUS_SUCCESS;
     case HV_X64_REGISTER_CR_INTERCEPT_CONTROL:
     case HV_X64_REGISTER_CR_INTERCEPT_CR0_MASK:
     case HV_X64_REGISTER_CR_INTERCEPT_CR4_MASK:
@@ -1334,6 +1335,11 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         return HV_STATUS_INVALID_PARAMETER;
     }
 
+    /*
+     * Only a case that modified @env reaches here. The caller pushes the
+     * target's whole register file for a dirty write, so a case that holds
+     * its state elsewhere returns success above instead.
+     */
     *dirty = true;
     return HV_STATUS_SUCCESS;
 }
