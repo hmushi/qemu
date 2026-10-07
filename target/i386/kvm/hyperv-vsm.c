@@ -1341,6 +1341,20 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
 /* registers handled per call; bounds the stack use, not a TLFS limit */
 #define VP_REGISTER_LIST_SIZE 16u
 
+/*
+ * A rejected call applies no register and logs nothing, so a guest restore
+ * refused here is indistinguishable from one the guest never issued.
+ */
+static uint64_t reject_vp_register_hcall(CPUState *cs, const char *why,
+                                         uint16_t rep_cnt, uint16_t rep_idx,
+                                         bool fast, bool set, uint64_t status)
+{
+    trace_hyperv_vsm_vp_register_hcall_reject(why, rep_cnt, rep_idx, fast, set,
+                                              hyperv_vp_index(cs),
+                                              active_vtl(cs), status);
+    return status;
+}
+
 uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
                                           struct kvm_hyperv_exit *exit,
                                           bool set)
@@ -1362,14 +1376,18 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
     int i;
 
     if (rep_idx >= rep_cnt) {
-        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+        return reject_vp_register_hcall(cs, "rep_idx past rep_cnt",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_HYPERCALL_INPUT);
     }
     nregs = MIN(rep_cnt - rep_idx, VP_REGISTER_LIST_SIZE);
 
     if (fast) {
         /* names (and values) travel in XMM registers */
         if (!hv_exit_has_xmm(exit)) {
-            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            return reject_vp_register_hcall(cs, "fast call without XMM",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
         }
         input.partition_id = exit->u.hcall.params[0];
         input.vp_index = exit->u.hcall.params[1] & 0xffffffff;
@@ -1377,12 +1395,16 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
 
         /* everything is returned at once, so no continuation */
         if (rep_idx != 0) {
-            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            return reject_vp_register_hcall(cs, "fast call with rep_idx",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
         }
 
         /* 6 XMM registers hold at most 4 names plus 4 values */
         if (nregs > 4) {
-            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            return reject_vp_register_hcall(cs, "fast call over 4 registers",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
         }
 
         for (i = 0; i < nregs; i += 4, xmm_index += 2) {
@@ -1402,13 +1424,17 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
         uint64_t ingpa = exit->u.hcall.params[0];
 
         if (vsm_physmem_read(cs, ingpa, &input, sizeof(input)) != MEMTX_OK) {
-            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            return reject_vp_register_hcall(cs, "input header unreadable",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
         }
 
         ingpa += sizeof(input) + rep_idx * sizeof(*names);
         if (vsm_physmem_read(cs, ingpa, names,
                              nregs * sizeof(*names)) != MEMTX_OK) {
-            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            return reject_vp_register_hcall(cs, "name list unreadable",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
         }
 
         if (set) {
@@ -1418,22 +1444,30 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
                     rep_idx * sizeof(*vals);
             if (vsm_physmem_read(cs, ingpa, vals,
                                  nregs * sizeof(*vals)) != MEMTX_OK) {
-                return HV_STATUS_INVALID_HYPERCALL_INPUT;
+                return reject_vp_register_hcall(
+                    cs, "value list unreadable", rep_cnt, rep_idx, fast, set,
+                    HV_STATUS_INVALID_HYPERCALL_INPUT);
             }
         }
     }
 
     if (input.partition_id != HV_PARTITION_ID_SELF) {
-        return HV_STATUS_INVALID_PARTITION_ID;
+        return reject_vp_register_hcall(cs, "partition not self",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_PARTITION_ID);
     }
 
     if (input_vtl_targets(input.input_vtl)) {
         vtl = input.input_vtl.target_vtl;
         if (vtl >= HV_NUM_VTLS) {
-            return HV_STATUS_INVALID_HYPERCALL_INPUT;
+            return reject_vp_register_hcall(cs, "target VTL out of range",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
         }
         if (vtl > active_vtl(cs)) {
-            return HV_STATUS_ACCESS_DENIED;
+            return reject_vp_register_hcall(cs, "target VTL above caller",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_ACCESS_DENIED);
         }
     } else {
         vtl = active_vtl(cs);
@@ -1442,12 +1476,16 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
     if (input.vp_index == HV_VP_INDEX_SELF) {
         input.vp_index = hyperv_vp_index(cs);
     } else if (input.vp_index >= ms->smp.max_cpus) {
-        return HV_STATUS_INVALID_VP_INDEX;
+        return reject_vp_register_hcall(cs, "VP index out of range",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_VP_INDEX);
     }
 
     target_vcpu = hv_plane_vcpu(input.vp_index, vtl);
     if (!target_vcpu) {
-        return HV_STATUS_INVALID_VP_INDEX;
+        return reject_vp_register_hcall(cs, "no vCPU for VP and VTL",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_VP_INDEX);
     }
 
     trace_hyperv_vsm_hcall_get_set_vp_registers(input.partition_id,
