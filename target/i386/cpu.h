@@ -2544,6 +2544,14 @@ struct ArchCPU {
 
     int32_t hv_max_vps;
 
+    /*
+     * VSM entry probe: plane-switch entries whose state was read back, and
+     * the nulls among them. Per plane CPUState, so only its own thread
+     * writes them.
+     */
+    uint64_t hv_plane_entry_reads;
+    uint64_t hv_plane_entry_nulls;
+
     bool xen_vapic;
 };
 

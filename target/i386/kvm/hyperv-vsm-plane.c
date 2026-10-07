@@ -395,8 +395,6 @@ static uint16_t vina_lower_planes(CPUState *cs, struct kvm_run *run)
 }
 
 /* post-switch entries read back, and how many of those carried a null */
-static uint64_t entry_reads, entry_nulls;
-
 void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
 {
     /* a higher VTL's pending interrupt ends this VTL's run (TLFS 15.3) */
@@ -417,28 +415,37 @@ void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
      */
     if (run->plane != cs->kvm_plane &&
         trace_event_get_state_backends(TRACE_HYPERV_VSM_PLANE_ENTRY_NULL)) {
+        X86CPU *cpu = X86_CPU(cs);
         int prev_plane = run->plane;
         struct kvm_dtable idt, gdt;
         int rc;
 
         rc = kvm_get_vcpu_dtables(cs, &idt, &gdt);
-        entry_reads++;
+        cpu->hv_plane_entry_reads++;
         if (rc < 0 || idt.limit == 0) {
-            CPUX86State *env = &X86_CPU(cs)->env;
+            CPUX86State *env = &cpu->env;
 
-            entry_nulls++;
+            cpu->hv_plane_entry_nulls++;
             trace_hyperv_vsm_plane_entry_null(hyperv_vp_index(cs),
                                               cs->kvm_plane, prev_plane, rc,
                                               env->idt.base, env->idt.limit,
                                               idt.base, idt.limit,
                                               gdt.base, gdt.limit);
         }
-        if (!(entry_reads % 4096)) {
+        /*
+         * The first entries of every processor and plane, then one in 16.
+         * A processor that takes a hundred of the boot's seventy thousand
+         * switch returns never reaches a shared period, so a census keyed
+         * on a single counter never prints the value it entered with.
+         */
+        if (cpu->hv_plane_entry_reads <= 8 ||
+            !(cpu->hv_plane_entry_reads % 16)) {
             trace_hyperv_vsm_plane_entry_census(hyperv_vp_index(cs),
-                                                cs->kvm_plane, entry_reads,
-                                                entry_nulls, idt.base,
-                                                idt.limit, gdt.base,
-                                                gdt.limit);
+                                                cs->kvm_plane,
+                                                cpu->hv_plane_entry_reads,
+                                                cpu->hv_plane_entry_nulls,
+                                                idt.base, idt.limit,
+                                                gdt.base, gdt.limit);
         }
     }
 }
