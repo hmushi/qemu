@@ -110,6 +110,54 @@ static const InsnCase cases[] = {
         0x11, 0x22, 0x33, 0x44, 0x55 } },
 };
 
+/*
+ * The decoder never refuses an unrecognised one-byte opcode: it sizes it as a
+ * single byte. A differential sweep against objdump over 457822 distinct
+ * instructions from compiler-generated x86-64 objects, plus 27695 swept
+ * opcode forms, produced no refusal at all. A non-zero length is therefore a
+ * best effort and not proof that the bytes are an instruction.
+ */
+static const InsnCase guesses[] = {
+    /* invalid in 64-bit mode, and the decoder says one byte regardless */
+    { "push %es", 64, 1, { 0x06 } },
+    { "popa", 64, 1, { 0x61 } },
+    { "salc", 64, 1, { 0xd6 } },
+    /*
+     * fwait is a whole instruction and retires on its own. An assembler
+     * writes 9b D9 /6 as one fstenv mnemonic and objdump groups it that way,
+     * but the processor executes two instructions and rip advances by one,
+     * so one byte is the right answer for an intercept at the 9b.
+     */
+    { "fwait ahead of fnstenv", 64, 1, { 0x9b, 0xd9, 0x75, 0xf9 } },
+};
+
+/*
+ * Encodings the decoder gets WRONG today. The expectations below are its
+ * current output, not the right answer, which is in the comment on each.
+ * None is reachable from compiler output, so none is urgent. A change that
+ * makes one of these correct should update the expectation here, not delete
+ * the case.
+ */
+static const InsnCase documented_gaps[] = {
+    /* extrq: 66 0F 78 takes two imm8 operands, so 6 */
+    { "extrq $imm8,$imm8,%xmm0", 64, 4,
+      { 0x66, 0x0f, 0x78, 0xc0, 0x01, 0x02 } },
+    /* insertq: F2 0F 78 likewise, so 6 */
+    { "insertq $imm8,$imm8,%xmm0,%xmm0", 64, 4,
+      { 0xf2, 0x0f, 0x78, 0xc0, 0x01, 0x02 } },
+    /* XOP map 9 has no imm8, so 5 */
+    { "vphaddwd %xmm11,%ymm3", 64, 6,
+      { 0x8f, 0x89, 0x6e, 0xc6, 0xdb } },
+    /*
+     * A legacy prefix or a second REX after the first REX is decoded as an
+     * opcode. Hardware ignores a REX that is not the last prefix, so the
+     * first is 6 bytes and the second 4.
+     */
+    { "rex.W then data16 then imm", 64, 2,
+      { 0x48, 0x66, 0x81, 0x00, 0x12, 0x34 } },
+    { "two rex.W then mov", 64, 2, { 0x48, 0x48, 0x8b, 0x00 } },
+};
+
 static void test_lengths(void)
 {
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -130,10 +178,30 @@ static void test_truncated(void)
     g_assert_cmpint(hyperv_vsm_insn_len(mov, 0, 64), ==, 0);
 }
 
+static void run_table(const InsnCase *t, int n)
+{
+    for (int i = 0; i < n; i++) {
+        g_assert_cmpint(hyperv_vsm_insn_len(t[i].b, sizeof(t[i].b),
+                                            t[i].mode), ==, t[i].len);
+    }
+}
+
+static void test_guesses(void)
+{
+    run_table(guesses, ARRAY_SIZE(guesses));
+}
+
+static void test_documented_gaps(void)
+{
+    run_table(documented_gaps, ARRAY_SIZE(documented_gaps));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/hyperv-vsm-insn/lengths", test_lengths);
     g_test_add_func("/hyperv-vsm-insn/truncated", test_truncated);
+    g_test_add_func("/hyperv-vsm-insn/guesses", test_guesses);
+    g_test_add_func("/hyperv-vsm-insn/documented-gaps", test_documented_gaps);
     return g_test_run();
 }

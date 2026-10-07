@@ -6,7 +6,14 @@
  * This only sizes instructions; it does not interpret them. Covered: legacy
  * prefixes, REX, the one-byte, 0F, 0F 38 and 0F 3A maps, 3DNow, VEX, XOP and
  * EVEX encodings, ModRM/SIB/displacement and immediate forms in 16, 32 and
- * 64-bit mode. An undecodable or truncated byte sequence returns 0.
+ * 64-bit mode.
+ *
+ * This is a best effort and not a validation. 0 means a truncated sequence,
+ * an encoding past the architectural 15-byte limit, or a form invalid in the
+ * mode. An unrecognised one-byte opcode is sized as a single byte instead,
+ * because every defined one that carries a ModRM byte or an immediate is
+ * enumerated here and the rest take no operands. So a non-zero result does
+ * not prove the bytes are an instruction.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
