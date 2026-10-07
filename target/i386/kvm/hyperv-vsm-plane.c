@@ -408,44 +408,59 @@ void hv_plane_pre_run(CPUState *cs, struct kvm_run *run)
      * The entry this plane resumes at is where both triple faults are, and
      * our own copy reads correct at every switch, so the question is what
      * the entered state holds rather than what we hold. Read it back here,
-     * the last point before KVM_RUN, on an entry whose plane differs from
-     * the one the shared page last ran: that is a switch return. Report
-     * only a null interrupt table, so a good entry costs one read and no
-     * output, and count every read so a zero is a measured zero.
+     * the last point before KVM_RUN.
+     *
+     * Two entries qualify. One whose plane differs from the plane the
+     * shared page last ran, which is a switch return. And the entries
+     * after a VINA notification, which keeps the plane and so is not a
+     * switch return: the gate alone would never read those, and the faults
+     * correlate with them.
+     *
+     * Report only a null interrupt table, so a good entry costs one read
+     * and no output, and count every read so a zero is a measured zero.
      */
-    if (run->plane != cs->kvm_plane &&
-        trace_event_get_state_backends(TRACE_HYPERV_VSM_PLANE_ENTRY_NULL)) {
-        X86CPU *cpu = X86_CPU(cs);
-        int prev_plane = run->plane;
-        struct kvm_dtable idt, gdt;
-        int rc;
+    if (trace_event_get_state_backends(TRACE_HYPERV_VSM_PLANE_ENTRY_NULL)) {
+        CPUState *leader = cs->kvm_plane_leader ? cs->kvm_plane_leader : cs;
+        bool after_notify = X86_CPU(leader)->hv_plane_entry_probe_due > 0;
 
-        rc = kvm_get_vcpu_dtables(cs, &idt, &gdt);
-        cpu->hv_plane_entry_reads++;
-        if (rc < 0 || idt.limit == 0) {
-            CPUX86State *env = &cpu->env;
+        if (run->plane != cs->kvm_plane || after_notify) {
+            X86CPU *cpu = X86_CPU(cs);
+            int prev_plane = run->plane;
+            struct kvm_dtable idt, gdt;
+            int rc;
 
-            cpu->hv_plane_entry_nulls++;
-            trace_hyperv_vsm_plane_entry_null(hyperv_vp_index(cs),
-                                              cs->kvm_plane, prev_plane, rc,
-                                              env->idt.base, env->idt.limit,
-                                              idt.base, idt.limit,
-                                              gdt.base, gdt.limit);
-        }
-        /*
-         * The first entries of every processor and plane, then one in 16.
-         * A processor that takes a hundred of the boot's seventy thousand
-         * switch returns never reaches a shared period, so a census keyed
-         * on a single counter never prints the value it entered with.
-         */
-        if (cpu->hv_plane_entry_reads <= 8 ||
-            !(cpu->hv_plane_entry_reads % 16)) {
-            trace_hyperv_vsm_plane_entry_census(hyperv_vp_index(cs),
-                                                cs->kvm_plane,
-                                                cpu->hv_plane_entry_reads,
-                                                cpu->hv_plane_entry_nulls,
-                                                idt.base, idt.limit,
-                                                gdt.base, gdt.limit);
+            if (after_notify) {
+                X86_CPU(leader)->hv_plane_entry_probe_due--;
+            }
+            rc = kvm_get_vcpu_dtables(cs, &idt, &gdt);
+            cpu->hv_plane_entry_reads++;
+            if (rc < 0 || idt.limit == 0) {
+                CPUX86State *env = &cpu->env;
+
+                cpu->hv_plane_entry_nulls++;
+                trace_hyperv_vsm_plane_entry_null(hyperv_vp_index(cs),
+                                                  cs->kvm_plane, prev_plane,
+                                                  rc, env->idt.base,
+                                                  env->idt.limit, idt.base,
+                                                  idt.limit, gdt.base,
+                                                  gdt.limit);
+            }
+            /*
+             * Every post-notification entry prints, so the value is shown
+             * rather than counted. Otherwise the first entries of every
+             * processor and plane, then one in 16: a processor that takes a
+             * hundred of the boot's seventy thousand switch returns never
+             * reaches a shared period.
+             */
+            if (after_notify || cpu->hv_plane_entry_reads <= 8 ||
+                !(cpu->hv_plane_entry_reads % 16)) {
+                trace_hyperv_vsm_plane_entry_census(hyperv_vp_index(cs),
+                                                    cs->kvm_plane,
+                                                    cpu->hv_plane_entry_reads,
+                                                    cpu->hv_plane_entry_nulls,
+                                                    idt.base, idt.limit,
+                                                    gdt.base, gdt.limit);
+            }
         }
     }
 }

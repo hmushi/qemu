@@ -783,6 +783,12 @@ int hyperv_vsm_vina_notify(CPUState *cs)
         set_vina_asserted(cs, false);
         return ret;
     }
+    /*
+     * Probe the entries that follow: this event keeps the plane, so they are
+     * not switch returns and the entry probe's own gate would miss them.
+     */
+    X86_CPU(cs->kvm_plane_leader ? cs->kvm_plane_leader : cs)
+        ->hv_plane_entry_probe_due = 16;
     return 0;
 }
 

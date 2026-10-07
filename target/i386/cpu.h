@@ -2552,6 +2552,14 @@ struct ArchCPU {
     uint64_t hv_plane_entry_reads;
     uint64_t hv_plane_entry_nulls;
 
+    /*
+     * Entries still to probe after a VINA notification. A lower-interrupt
+     * event keeps the plane, so the entry that follows is not a switch
+     * return and the probe's own gate would miss it. On the leader, so any
+     * plane of that processor is covered.
+     */
+    uint32_t hv_plane_entry_probe_due;
+
     bool xen_vapic;
 };
 
