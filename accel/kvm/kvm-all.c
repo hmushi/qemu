@@ -448,6 +448,19 @@ static int kvm_rebind_vcpus(Error **errp)
     KVMState *s = kvm_state;
     int kvm_fd, ret = 0;
 
+    /*
+     * A plane vCPU came from KVM_CREATE_VCPU on its plane's fd, so the loop
+     * below would hand it a plane-0 vCPU from the VM fd. Refuse before the
+     * first vCPU is destroyed, because a partial rebind cannot be undone.
+     */
+    CPU_FOREACH(cpu) {
+        if (cpu->kvm_plane > 0) {
+            error_report("kvm: cannot rebind vCPUs: CPU %d is on plane %d",
+                         cpu->cpu_index, cpu->kvm_plane);
+            return -EINVAL;
+        }
+    }
+
     CPU_FOREACH(cpu) {
         vcpu_id = kvm_arch_vcpu_id(cpu);
 
