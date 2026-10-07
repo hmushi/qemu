@@ -84,6 +84,13 @@ void hyperv_vsm_vtl_switch_state(CPUState *prev, CPUState *next,
  * hyperv_vsm_vina_notify(): assert it (inject the VINA vector into @cs's
  * LAPIC, set vina_asserted in its VP assist page). Both on @cs's thread.
  */
+/*
+ * The last interrupt-table reading of plane @vtl that was read back from KVM.
+ * The shutdown dump reads zero for that field on its own path, so it has no
+ * base of its own to translate.
+ */
+bool hv_plane_last_idt(int vtl, uint64_t *base, uint32_t *limit);
+
 bool hyperv_vsm_vina_armed(CPUState *cs);
 int hyperv_vsm_vina_notify(CPUState *cs);
 

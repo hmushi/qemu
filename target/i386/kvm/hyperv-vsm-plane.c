@@ -256,6 +256,17 @@ static uint16_t higher_planes(CPUState *cs, int vtl)
     return mask;
 }
 
+/*
+ * The last descriptor reading of each plane that was actually read back from
+ * KVM. The shutdown dump has no table base of its own to translate, because
+ * that field reads zero on that path while the global table reads correctly.
+ */
+static struct {
+    uint64_t base;
+    uint32_t limit;
+    bool valid;
+} last_idt[HV_NUM_VTLS];
+
 /* descriptor state of both planes at a switch step; idt/gdt are per-VTL */
 static void trace_desc_state(const char *phase, CPUState *cs, CPUState *target)
 {
@@ -264,13 +275,34 @@ static void trace_desc_state(const char *phase, CPUState *cs, CPUState *target)
 
     for (i = 0; i < 2; i++) {
         CPUX86State *env = &X86_CPU(c[i])->env;
+        int vtl = hv_plane_active_vtl(c[i]);
 
-        trace_hyperv_vsm_plane_desc_state(phase, hyperv_vp_index(c[i]),
-                                          hv_plane_active_vtl(c[i]),
+        trace_hyperv_vsm_plane_desc_state(phase, hyperv_vp_index(c[i]), vtl,
                                           c[i]->vcpu_dirty, env->idt.base,
                                           env->idt.limit, env->gdt.base,
                                           env->gdt.limit);
+        /*
+         * Keep the last reading for the shutdown dump, which needs a table
+         * base to translate and reads zero for it on that path. Only a dirty
+         * CPUState has been read back from KVM, so an undirty reading is a
+         * stale copy and is not kept.
+         */
+        if (c[i]->vcpu_dirty && env->idt.base && vtl < HV_NUM_VTLS) {
+            last_idt[vtl].base = env->idt.base;
+            last_idt[vtl].limit = env->idt.limit;
+            last_idt[vtl].valid = true;
+        }
     }
+}
+
+bool hv_plane_last_idt(int vtl, uint64_t *base, uint32_t *limit)
+{
+    if (vtl < 0 || vtl >= HV_NUM_VTLS || !last_idt[vtl].valid) {
+        return false;
+    }
+    *base = last_idt[vtl].base;
+    *limit = last_idt[vtl].limit;
+    return true;
 }
 
 int hv_plane_run_vtl(CPUState *cs, int target_vtl, HvPlaneSwitchReason reason)

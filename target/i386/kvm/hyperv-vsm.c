@@ -1696,6 +1696,95 @@ static bool prot_is_no_access(uint32_t flags)
  * triple fault needs the fault itself to be unserviceable, so the question
  * is whether a page the fault path requires is one we made inaccessible.
  */
+/*
+ * One page the exception delivery path has to touch: translate it through the
+ * plane's own tables and say whether its frame is denied. A hit in the list is
+ * trustworthy and a miss is not, because the list records what was applied
+ * rather than a read-back of the plane attributes.
+ */
+static void dump_delivery_page(CPUState *cs, GHashTable *prots,
+                               const char *what, uint64_t gva)
+{
+    TranslateForDebugResult tres;
+    uint64_t frame;
+    const char *verdict;
+
+    if (!gva) {
+        qemu_log("hyperv-vsm:   %-18s not set\n", what);
+        return;
+    }
+    if (!cpu_translate_for_debug(cs, gva, &tres)) {
+        qemu_log("hyperv-vsm:   %-18s gva 0x%" PRIx64 " does not translate\n",
+                 what, gva);
+        return;
+    }
+
+    frame = (uint64_t)tres.physaddr >> HV_HYP_PAGE_SHIFT;
+    if (!g_hash_table_contains(prots, GUINT_TO_POINTER(frame))) {
+        verdict = "not in the list";
+    } else if (prot_is_no_access(GPOINTER_TO_UINT(g_hash_table_lookup(prots,
+                   GUINT_TO_POINTER(frame))))) {
+        verdict = "NO ACCESS";
+    } else {
+        verdict = "allowed";
+    }
+    qemu_log("hyperv-vsm:   %-18s gva 0x%" PRIx64 " gpa 0x%" PRIx64
+             " frame 0x%" PRIx64 " %s\n", what, gva,
+             (uint64_t)tres.physaddr, frame, verdict);
+}
+
+/*
+ * The pages an exception needs before it can be delivered: the interrupt
+ * table, the task-state segment, and the stacks the segment names. If any of
+ * them is denied, delivery cannot complete whatever triggered it, which is
+ * the shape that turns one fault into a triple fault.
+ */
+static void dump_delivery_path(CPUState *cs, GHashTable *prots, int vtl)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+    uint8_t tss[104];
+    uint64_t base;
+    uint32_t limit;
+    int i;
+
+    qemu_log("hyperv-vsm: VTL%d delivery path\n", vtl);
+    dump_delivery_page(cs, prots, "idtr live", env->idt.base);
+    if (hv_plane_last_idt(vtl, &base, &limit)) {
+        qemu_log("hyperv-vsm:   idtr last read   base=0x%" PRIx64
+                 " limit=0x%x, from a switch\n", base, limit);
+        dump_delivery_page(cs, prots, "idtr last read", base);
+    }
+    dump_delivery_page(cs, prots, "tr (TSS)", env->tr.base);
+
+    /* a 64-bit TSS holds RSP0-2 at +4 and IST1-7 at +36 (SDM 8.7) */
+    if (!env->tr.base || env->tr.limit < sizeof(tss) - 1) {
+        return;
+    }
+    if (cpu_memory_rw_debug(cs, env->tr.base, tss, sizeof(tss), false)) {
+        qemu_log("hyperv-vsm:   TSS at 0x%" PRIx64 " is unreadable\n",
+                 (uint64_t)env->tr.base);
+        return;
+    }
+    /*
+     * A stack pointer names the top of the stack, so the page the delivery
+     * path writes is the one holding the byte below it.
+     */
+    for (i = 0; i < 3; i++) {
+        char name[20];
+        uint64_t rsp = ldq_le_p(tss + 4 + i * 8);
+
+        snprintf(name, sizeof(name), "rsp%d stack top-1", i);
+        dump_delivery_page(cs, prots, name, rsp ? rsp - 1 : 0);
+    }
+    for (i = 1; i <= 7; i++) {
+        char name[20];
+        uint64_t ist = ldq_le_p(tss + 36 + (i - 1) * 8);
+
+        snprintf(name, sizeof(name), "ist%d stack top-1", i);
+        dump_delivery_page(cs, prots, name, ist ? ist - 1 : 0);
+    }
+}
+
 void hyperv_vsm_dump_protections(CPUState *cs)
 {
     CPUX86State *env = &X86_CPU(cs)->env;
@@ -1722,11 +1811,13 @@ void hyperv_vsm_dump_protections(CPUState *cs)
              " (exiting plane, synchronised read)\n", vtl, total, denied);
 
     /*
-     * KVM_EXIT_SHUTDOWN carries no address, so the faulting page cannot be
-     * named here. Say so rather than omit it; cr2 is the nearest signal.
+     * KVM_EXIT_SHUTDOWN carries no address, and cr2 reads zero on every fault
+     * captured with the corrected register read, so there is no fault address
+     * to translate. Print it anyway, because an omitted field reads as an
+     * absent one, but the delivery path below is what carries the signal.
      */
     qemu_log("hyperv-vsm: faulting gpa: not carried by this exit; cr2=0x%"
-             PRIx64 " is the last page-fault linear address\n",
+             PRIx64 " (zero on every corrected capture so far)\n",
              (uint64_t)env->cr[2]);
 
     /* cr3 is physical, so it can be tested; the table bases are linear */
@@ -1749,6 +1840,8 @@ void hyperv_vsm_dump_protections(CPUState *cs)
              PRIx64 " limit=0x%x (linear, not translated here)\n",
              (uint64_t)env->idt.base, env->idt.limit,
              (uint64_t)env->gdt.base, env->gdt.limit);
+
+    dump_delivery_path(cs, prots, vtl);
 
     if (!denied) {
         return;
