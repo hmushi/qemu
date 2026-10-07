@@ -23,6 +23,7 @@
 #include "qemu/option.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
+#include "exec/log.h"
 #include "qapi/error.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
@@ -3714,6 +3715,15 @@ int kvm_cpu_exec(CPUState *cpu)
             break;
         case KVM_EXIT_SHUTDOWN:
             trace_kvm_run_exit_shutdown(cpu->cpu_index, cpu->kvm_plane);
+            /*
+             * On x86 this exit is a triple fault. The reset below discards the
+             * state that caused it, and the window is too short to sample from
+             * outside, so dump it here while it still exists.
+             */
+            kvm_cpu_synchronize_state(cpu);
+            qemu_log("kvm: guest shutdown exit, cpu %d plane %d\n",
+                     cpu->cpu_index, cpu->kvm_plane);
+            log_cpu_state(cpu, CPU_DUMP_CODE);
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             ret = EXCP_INTERRUPT;
             break;
