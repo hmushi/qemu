@@ -1294,7 +1294,9 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
         return HV_STATUS_INVALID_PARAMETER;
     }
 
-    trace_hyperv_vsm_vp_register(false, name, val->low_part, val->high_part);
+    trace_hyperv_vsm_vp_register(false, hyperv_vp_index(target_vcpu),
+                                 active_vtl(target_vcpu), name,
+                                 val->low_part, val->high_part);
     return HV_STATUS_SUCCESS;
 }
 
@@ -1349,7 +1351,9 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
     struct hv_x64_segment_register seg;
     struct hv_x64_table_register tr;
 
-    trace_hyperv_vsm_vp_register(true, name, val->low_part, val->high_part);
+    trace_hyperv_vsm_vp_register(true, hyperv_vp_index(target_vcpu),
+                                 active_vtl(target_vcpu), name,
+                                 val->low_part, val->high_part);
 
     switch (name) {
     case HV_X64_REGISTER_RSP:
