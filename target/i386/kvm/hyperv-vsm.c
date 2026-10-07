@@ -516,8 +516,14 @@ static void load_vp_context(CPUState *cs, const struct hv_init_vp_context *c,
 {
     CPUX86State *env = &X86_CPU(cs)->env;
 
+    /*
+     * The descriptor tables are traced because this call is the only thing
+     * that programs them for the plane: the secure kernel carries no table
+     * load of its own. cr0 and cr4 do not fit the 10-argument trace limit.
+     */
     trace_hyperv_vsm_vp_context(hyperv_vp_index(cs), active_vtl(cs), c->rip,
-                                c->rsp, c->cr3, c->efer);
+                                c->rsp, c->cr3, c->efer, c->idtr.base,
+                                c->idtr.limit, c->gdtr.base, c->gdtr.limit);
 
     env->regs[R_ESP] = c->rsp;
     env->eip = c->rip;
