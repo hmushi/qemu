@@ -214,6 +214,9 @@ int kvm_check_extension(KVMState *s, unsigned int extension);
 
 int kvm_vm_ioctl(KVMState *s, unsigned long type, ...);
 
+/* called on the KVM shutdown exit, after the register dump */
+void kvm_set_shutdown_dump_hook(void (*fn)(CPUState *cs));
+
 void kvm_flush_coalesced_mmio_buffer(void);
 
 void kvm_irqchip_add_change_notifier(Notifier *n);

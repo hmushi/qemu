@@ -416,6 +416,7 @@ int hyperv_vsm_init_vcpu(X86CPU *cpu)
             return -1;
         }
         qemu_register_reset(hyperv_vsm_reset, NULL);
+        kvm_set_shutdown_dump_hook(hyperv_vsm_dump_protections);
         if (kvm_filter_msr(s, HV_X64_MSR_APIC_ASSIST_PAGE,
                            vp_assist_page_rdmsr, vp_assist_page_wrmsr) < 0 ||
             kvm_filter_msr(s, HV_X64_MSR_HYPERCALL,
@@ -1661,6 +1662,80 @@ static int read_faulting_insn(CPUState *cs, uint8_t *insn, int size)
     }
     memset(insn + n, 0, size - n);
     return n;
+}
+
+/* denies read, write and execute to the lower VTL */
+static bool prot_is_no_access(uint32_t flags)
+{
+    return !(flags & (HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE |
+                      HV_MAP_GPA_EXECUTABLE));
+}
+
+/*
+ * The protections in force on the faulting VTL, for the shutdown path. A
+ * triple fault needs the fault itself to be unserviceable, so the question
+ * is whether a page the fault path requires is one we made inaccessible.
+ */
+void hyperv_vsm_dump_protections(CPUState *cs)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+    int vtl = active_vtl(cs);
+    GHashTable *prots = hv_vsm.prots[vtl];
+    guint total, denied = 0, printed = 0;
+    GHashTableIter it;
+    gpointer k, v;
+    uint64_t cr3_gfn;
+
+    if (!prots) {
+        qemu_log("hyperv-vsm: VTL%d has no protection table\n", vtl);
+        return;
+    }
+
+    total = g_hash_table_size(prots);
+    g_hash_table_iter_init(&it, prots);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        if (prot_is_no_access(GPOINTER_TO_UINT(v))) {
+            denied++;
+        }
+    }
+    qemu_log("hyperv-vsm: VTL%d protections: %u entries, %u with no access\n",
+             vtl, total, denied);
+
+    /*
+     * KVM_EXIT_SHUTDOWN carries no address, so the faulting page cannot be
+     * named here. Say so rather than omit it; cr2 is the nearest signal.
+     */
+    qemu_log("hyperv-vsm: faulting gpa: not carried by this exit; cr2=0x%"
+             PRIx64 " is the last page-fault linear address\n",
+             (uint64_t)env->cr[2]);
+
+    /* cr3 is physical, so it can be tested; the table bases are linear */
+    cr3_gfn = (env->cr[3] & ~0xfffULL) >> HV_HYP_PAGE_SHIFT;
+    qemu_log("hyperv-vsm: cr3=0x%" PRIx64 " frame 0x%" PRIx64 " no-access=%s\n",
+             (uint64_t)env->cr[3], cr3_gfn,
+             g_hash_table_contains(prots, GUINT_TO_POINTER(cr3_gfn)) &&
+             prot_is_no_access(GPOINTER_TO_UINT(g_hash_table_lookup(prots,
+                 GUINT_TO_POINTER(cr3_gfn)))) ? "YES" : "no");
+    qemu_log("hyperv-vsm: idtr base=0x%" PRIx64 " limit=0x%x, gdtr base=0x%"
+             PRIx64 " limit=0x%x (linear, not translated here)\n",
+             (uint64_t)env->idt.base, env->idt.limit,
+             (uint64_t)env->gdt.base, env->gdt.limit);
+
+    if (!denied) {
+        return;
+    }
+    qemu_log("hyperv-vsm: no-access frames, gfn:mask");
+    g_hash_table_iter_init(&it, prots);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        uint32_t flags = GPOINTER_TO_UINT(v);
+
+        if (!prot_is_no_access(flags)) {
+            continue;
+        }
+        qemu_log("%s0x%x:0x%x", (printed++ % 8) ? " " : "\n  ",
+                 GPOINTER_TO_UINT(k), flags);
+    }
+    qemu_log("\n");
 }
 
 /* TLFS 15.10.2: build the GPA intercept message for a lower-VTL fault */

@@ -3317,6 +3317,14 @@ static void kvm_handle_io(uint16_t port, MemTxAttrs attrs, void *data, int direc
     }
 }
 
+static void (*kvm_shutdown_dump)(CPUState *cs);
+
+/* accelerator-neutral: set this to add to the shutdown-exit dump */
+void kvm_set_shutdown_dump_hook(void (*fn)(CPUState *cs))
+{
+    kvm_shutdown_dump = fn;
+}
+
 static int kvm_handle_internal_error(CPUState *cpu, struct kvm_run *run)
 {
     int i;
@@ -3724,6 +3732,9 @@ int kvm_cpu_exec(CPUState *cpu)
             qemu_log("kvm: guest shutdown exit, cpu %d plane %d\n",
                      cpu->cpu_index, cpu->kvm_plane);
             log_cpu_state(cpu, CPU_DUMP_CODE);
+            if (kvm_shutdown_dump) {
+                kvm_shutdown_dump(cpu);
+            }
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             ret = EXCP_INTERRUPT;
             break;

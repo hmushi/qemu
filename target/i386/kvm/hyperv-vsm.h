@@ -16,6 +16,9 @@
 /* per-vCPU VSM state (VP assist page, hypercall page, VTL config) */
 int hyperv_vsm_init_vcpu(X86CPU *cpu);
 
+/* protections on the faulting VTL, for the KVM shutdown exit */
+void hyperv_vsm_dump_protections(CPUState *cs);
+
 /* hypercall handlers, called from kvm_hv_handle_exit() */
 uint16_t hyperv_hcall_vtl_enable_partition_vtl(CPUState *cs, uint64_t param1,
                                                uint64_t param2, bool fast);
