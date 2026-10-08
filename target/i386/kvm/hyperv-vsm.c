@@ -1707,24 +1707,29 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
                                             HV_STATUS_INVALID_HYPERCALL_INPUT);
         }
 
-        ingpa += sizeof(input) + rep_idx * sizeof(*names);
-        if (vsm_physmem_read(cs, ingpa, names,
-                             nregs * sizeof(*names)) != MEMTX_OK) {
-            return reject_vp_register_hcall(cs, "name list unreadable",
-                                            rep_cnt, rep_idx, fast, set,
-                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
-        }
-
         if (set) {
-            /* values start 16-byte aligned after all rep_cnt names */
-            ingpa = ROUND_UP(exit->u.hcall.params[0] + sizeof(input) +
-                             rep_cnt * sizeof(*names), 16) +
-                    rep_idx * sizeof(*vals);
-            if (vsm_physmem_read(cs, ingpa, vals,
-                                 nregs * sizeof(*vals)) != MEMTX_OK) {
+            /* a set carries the name and the value of each register together */
+            hv_register_assoc elements[VP_REGISTER_LIST_SIZE];
+
+            ingpa += sizeof(input) + rep_idx * sizeof(*elements);
+            if (vsm_physmem_read(cs, ingpa, elements,
+                                 nregs * sizeof(*elements)) != MEMTX_OK) {
                 return reject_vp_register_hcall(
-                    cs, "value list unreadable", rep_cnt, rep_idx, fast, set,
+                    cs, "element list unreadable", rep_cnt, rep_idx, fast, set,
                     HV_STATUS_INVALID_HYPERCALL_INPUT);
+            }
+
+            for (i = 0; i < nregs; i++) {
+                names[i] = elements[i].name;
+                vals[i] = elements[i].value.reg128;
+            }
+        } else {
+            ingpa += sizeof(input) + rep_idx * sizeof(*names);
+            if (vsm_physmem_read(cs, ingpa, names,
+                                 nregs * sizeof(*names)) != MEMTX_OK) {
+                return reject_vp_register_hcall(cs, "name list unreadable",
+                                                rep_cnt, rep_idx, fast, set,
+                                                HV_STATUS_INVALID_HYPERCALL_INPUT);
             }
         }
     }
