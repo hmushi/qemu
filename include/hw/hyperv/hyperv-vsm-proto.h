@@ -142,10 +142,16 @@ union hv_register_vsm_code_page_offsets {
 union hv_register_vsm_capabilities {
     uint64_t as_uint64;
     struct {
-        uint64_t reserved:46;
-        uint64_t deny_lower_vtl_startup:1;
-        uint64_t mbec_vtl_mask:16;
         uint64_t dr6_shared:1;
+        uint64_t mbec_vtl_mask:16;
+        uint64_t deny_lower_vtl_startup:1;
+        uint64_t supervisor_shadow_stack:1;
+        uint64_t hardware_hvpt_available:1;
+        uint64_t software_hvpt_available:1;
+        uint64_t hardware_hvpt_range_bits:6;
+        uint64_t intercept_page_available:1;
+        uint64_t return_action_available:1;
+        uint64_t reserved:35;
     };
 };
 
