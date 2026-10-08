@@ -565,6 +565,19 @@ int hyperv_vsm_init_vcpu(X86CPU *cpu)
     return 0;
 }
 
+static int hv_seg_index(uint32_t name)
+{
+    switch (name) {
+    case HV_X64_REGISTER_ES: return R_ES;
+    case HV_X64_REGISTER_CS: return R_CS;
+    case HV_X64_REGISTER_SS: return R_SS;
+    case HV_X64_REGISTER_DS: return R_DS;
+    case HV_X64_REGISTER_FS: return R_FS;
+    case HV_X64_REGISTER_GS: return R_GS;
+    }
+    g_assert_not_reached();
+}
+
 static void set_seg(SegmentCache *lhs,
                     const struct hv_x64_segment_register *rhs)
 {
@@ -1308,6 +1321,15 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
     case HV_X64_REGISTER_DR6:
         val->low_part = env->dr[6];
         break;
+    case HV_X64_REGISTER_ES:
+    case HV_X64_REGISTER_CS:
+    case HV_X64_REGISTER_SS:
+    case HV_X64_REGISTER_DS:
+    case HV_X64_REGISTER_FS:
+    case HV_X64_REGISTER_GS:
+        get_seg(&env->segs[hv_seg_index(name)], &seg);
+        memcpy(val, &seg, sizeof(seg));
+        break;
     case HV_X64_REGISTER_LDTR:
         get_seg(&env->ldt, &seg);
         memcpy(val, &seg, sizeof(seg));
@@ -1508,6 +1530,15 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         /* the APIC holds this, so the register file is unchanged */
         cpu_set_apic_base(cpu->apic_state, val->low_part);
         return HV_STATUS_SUCCESS;
+    case HV_X64_REGISTER_ES:
+    case HV_X64_REGISTER_CS:
+    case HV_X64_REGISTER_SS:
+    case HV_X64_REGISTER_DS:
+    case HV_X64_REGISTER_FS:
+    case HV_X64_REGISTER_GS:
+        memcpy(&seg, val, sizeof(seg));
+        set_seg(&env->segs[hv_seg_index(name)], &seg);
+        break;
     case HV_X64_REGISTER_LDTR:
         memcpy(&seg, val, sizeof(seg));
         set_seg(&env->ldt, &seg);
