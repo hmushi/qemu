@@ -371,6 +371,38 @@ static void clear_vp_assist_work(CPUState *cs, run_on_cpu_data arg)
     kvm_put_hv_vp_assist(X86_CPU(cs), 0);
 }
 
+typedef struct HvBackingMsr {
+    CPUState *target;
+    uint32_t index;
+    uint64_t value;
+} HvBackingMsr;
+
+static void put_backing_msr_work(CPUState *leader, run_on_cpu_data arg)
+{
+    HvBackingMsr *w = arg.host_ptr;
+
+    kvm_put_one_msr(X86_CPU(w->target), w->index, w->value);
+    g_free(w);
+}
+
+/* the MSR has to be written on the thread that runs @target */
+static void hv_put_backing_msr(CPUState *target, uint32_t index, uint64_t value)
+{
+    CPUState *leader = target->kvm_plane_leader ?: target;
+    HvBackingMsr *w;
+
+    if (qemu_cpu_is_self(leader)) {
+        kvm_put_one_msr(X86_CPU(target), index, value);
+        return;
+    }
+
+    w = g_new(HvBackingMsr, 1);
+    w->target = target;
+    w->index = index;
+    w->value = value;
+    async_run_on_cpu(leader, put_backing_msr_work, RUN_ON_CPU_HOST_PTR(w));
+}
+
 static void clear_vina_work(CPUState *cs, run_on_cpu_data arg)
 {
     set_vina(cs, 0);
@@ -1344,6 +1376,15 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
     case HV_REGISTER_VP_ASSIST_PAGE:
         val->low_part = vpvsm->msr_hv_vp_assist;
         break;
+    case HV_X64_REGISTER_HYPERCALL:
+        val->low_part = env->msr_hv_hypercall;
+        break;
+    case HV_REGISTER_GUEST_OS_ID:
+        val->low_part = env->msr_hv_guest_os_id;
+        break;
+    case HV_REGISTER_REFERENCE_TSC:
+        val->low_part = env->msr_hv_tsc;
+        break;
     case HV_REGISTER_VSM_CODE_PAGE_OFFSETS:
         val->low_part = hv_vsm.code_page_offsets.as_uint64;
         break;
@@ -1523,6 +1564,25 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
     case HV_REGISTER_VP_ASSIST_PAGE:
         env->msr_hv_vapic = val->low_part;
         setup_vp_assist(target_vcpu, val->low_part);
+        break;
+    /*
+     * MSR-backed registers. A hibernated guest publishes its reference TSC
+     * page through this interface on resume. The register push runs only at
+     * reset level and only for one processor, so the write has to reach KVM
+     * here.
+     */
+    case HV_X64_REGISTER_HYPERCALL:
+        env->msr_hv_hypercall = val->low_part;
+        setup_hypercall_page(target_vcpu, val->low_part);
+        break;
+    case HV_REGISTER_GUEST_OS_ID:
+        env->msr_hv_guest_os_id = val->low_part;
+        hv_put_backing_msr(target_vcpu, HV_X64_MSR_GUEST_OS_ID, val->low_part);
+        break;
+    case HV_REGISTER_REFERENCE_TSC:
+        env->msr_hv_tsc = val->low_part;
+        hv_put_backing_msr(target_vcpu, HV_X64_MSR_REFERENCE_TSC,
+                           val->low_part);
         break;
     case HV_REGISTER_VSM_VINA:
         set_vina(target_vcpu, val->low_part);
