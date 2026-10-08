@@ -439,6 +439,7 @@ static void hyperv_vsm_reset(void *opaque)
         /* kvm_put_msrs() skips this MSR under VSM: the filter path owns it */
         run_on_cpu(cs, clear_vp_assist_work, RUN_ON_CPU_NULL);
         if (vpvsm->intercept_route) {
+            hyperv_sint_route_cancel(vpvsm->intercept_route);
             hyperv_sint_route_unref(vpvsm->intercept_route);
             vpvsm->intercept_route = NULL;
         }

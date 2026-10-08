@@ -27,6 +27,8 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint
                                    HvSintMsgCb cb, void *cb_data);
 void hyperv_sint_route_ref(HvSintRoute *sint_route);
 void hyperv_sint_route_unref(HvSintRoute *sint_route);
+/* stop waiting for the guest to acknowledge a posted message */
+void hyperv_sint_route_cancel(HvSintRoute *sint_route);
 
 int hyperv_sint_route_set_sint(HvSintRoute *sint_route);
 /* whether the route got a GSI: the SynIC was enabled when it was created */

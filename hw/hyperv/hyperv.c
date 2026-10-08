@@ -250,6 +250,8 @@ struct HvSintRoute {
     EventNotifier sint_ack_notifier;
 
     HvSintStagedMessage *staged_msg;
+    /* completion BH owned by the route, so unref can cancel it */
+    QEMUBH *msg_bh;
 
     unsigned refcount;
     QLIST_ENTRY(HvSintRoute) link;
@@ -322,8 +324,7 @@ posted:
      * trigger the notification from KVM via sint_ack_notifier
      */
     if (!wait_for_sint_ack) {
-        aio_bh_schedule_oneshot(qemu_get_aio_context(), sint_msg_bh,
-                                sint_route);
+        qemu_bh_schedule(sint_route->msg_bh);
     }
 }
 
@@ -364,7 +365,7 @@ static void sint_ack_handler(EventNotifier *notifier)
      * the guest consumed the previous message so complete the current one with
      * -EAGAIN and let the msg originator retry
      */
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), sint_msg_bh, sint_route);
+    qemu_bh_schedule(sint_route->msg_bh);
 }
 
 /*
@@ -512,6 +513,7 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint
         }
         sint_route->staged_msg->cb = cb;
         sint_route->staged_msg->cb_data = cb_data;
+        sint_route->msg_bh = qemu_bh_new(sint_msg_bh, sint_route);
 
         r = event_notifier_init(ack_notifier, false);
         if (r < 0) {
@@ -537,6 +539,7 @@ cleanup_err_sint:
             event_notifier_cleanup(ack_notifier);
         }
 
+        qemu_bh_delete(sint_route->msg_bh);
         g_free(sint_route->staged_msg);
     }
 
@@ -547,6 +550,25 @@ cleanup_err_sint:
 void hyperv_sint_route_ref(HvSintRoute *sint_route)
 {
     sint_route->refcount++;
+}
+
+void hyperv_sint_route_cancel(HvSintRoute *sint_route)
+{
+    HvSintStagedMessage *staged_msg;
+
+    if (!sint_route) {
+        return;
+    }
+    staged_msg = sint_route->staged_msg;
+    if (!staged_msg ||
+        qatomic_cmpxchg(&staged_msg->state, HV_STAGED_MSG_POSTED,
+                        HV_STAGED_MSG_FREE) != HV_STAGED_MSG_POSTED) {
+        return;
+    }
+    staged_msg->status = 0;
+    event_notifier_set_handler(&sint_route->sint_ack_notifier, NULL);
+    /* drop the reference hyperv_post_msg took for the completion */
+    hyperv_sint_route_unref(sint_route);
 }
 
 void hyperv_sint_route_unref(HvSintRoute *sint_route)
@@ -580,6 +602,7 @@ void hyperv_sint_route_unref(HvSintRoute *sint_route)
     if (sint_route->staged_msg) {
         event_notifier_set_handler(&sint_route->sint_ack_notifier, NULL);
         event_notifier_cleanup(&sint_route->sint_ack_notifier);
+        qemu_bh_delete(sint_route->msg_bh);
         g_free(sint_route->staged_msg);
     }
     g_free(sint_route);
