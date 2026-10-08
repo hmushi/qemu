@@ -1305,6 +1305,9 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
     case HV_X64_REGISTER_DR7:
         val->low_part = env->dr[7];
         break;
+    case HV_X64_REGISTER_DR6:
+        val->low_part = env->dr[6];
+        break;
     case HV_X64_REGISTER_LDTR:
         get_seg(&env->ldt, &seg);
         memcpy(val, &seg, sizeof(seg));
@@ -1336,6 +1339,9 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
         break;
     case HV_X64_REGISTER_SYSENTER_ESP:
         val->low_part = env->sysenter_esp;
+        break;
+    case HV_X64_REGISTER_KERNEL_GS_BASE:
+        val->low_part = env->kernelgsbase;
         break;
     case HV_X64_REGISTER_STAR:
         val->low_part = env->star;
@@ -1492,6 +1498,16 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
     case HV_X64_REGISTER_DR7:
         env->dr[7] = val->low_part;
         break;
+    case HV_X64_REGISTER_DR6:
+        env->dr[6] = val->low_part;
+        break;
+    case HV_X64_REGISTER_KERNEL_GS_BASE:
+        env->kernelgsbase = val->low_part;
+        break;
+    case HV_X64_REGISTER_APIC_BASE:
+        /* the APIC holds this, so the register file is unchanged */
+        cpu_set_apic_base(cpu->apic_state, val->low_part);
+        return HV_STATUS_SUCCESS;
     case HV_X64_REGISTER_LDTR:
         memcpy(&seg, val, sizeof(seg));
         set_seg(&env->ldt, &seg);

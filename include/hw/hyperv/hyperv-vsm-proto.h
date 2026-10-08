@@ -52,6 +52,7 @@
 #define HVCALL_GET_VP_INDEX_FROM_APIC_ID        0x009a
 
 /* TLFS 15.6 VSM registers (hvdef HvRegisterVsm*) and x64 names not in hvdef */
+#define HV_X64_REGISTER_DR6                                 0x00050004
 #define HV_X64_REGISTER_DR7                                 0x00050005
 #define HV_REGISTER_VP_ASSIST_PAGE                          0x00090013
 #define HV_REGISTER_VSM_CODE_PAGE_OFFSETS                   0x000D0002
