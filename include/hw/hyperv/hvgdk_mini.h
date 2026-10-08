@@ -192,6 +192,8 @@ typedef enum hv_register_name {
     HV_X64_REGISTER_HYPERCALL       = 0x00090001,
     HV_REGISTER_GUEST_OS_ID         = 0x00090002,
     HV_REGISTER_REFERENCE_TSC       = 0x00090017,
+    /* reserved value in every public header: store it, do not read it */
+    HV_REGISTER_VP_CONFIG           = 0x00090018,
 
     /* Hypervisor-defined Registers (Synic) */
     HV_REGISTER_SINT0       = 0x000A0000,
