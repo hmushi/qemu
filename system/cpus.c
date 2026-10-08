@@ -101,6 +101,10 @@ bool cpu_thread_is_idle(CPUState *cpu)
     if (cpu_is_stopped(cpu)) {
         return true;
     }
+    /* the thread runs the selected plane, so that plane's state decides */
+    if (cpu->kvm_plane_active && cpu_is_stopped(cpu->kvm_plane_active)) {
+        return true;
+    }
     if (!cpu->halted || cpu_has_work(cpu)) {
         return false;
     }
