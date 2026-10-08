@@ -65,6 +65,8 @@ struct VpVsmState {
     HvSintRoute *intercept_route;
     /* a start is queued on this processor's thread and has not run yet */
     bool start_pending;
+    /* this processor's own start has completed, so it is running */
+    bool started;
     /* bumped at every system reset, so a queued start can tell it is stale */
     unsigned reset_gen;
     struct hyperv_message intercept_msg;
@@ -398,6 +400,7 @@ static void hyperv_vsm_reset(void *opaque)
             continue;
         }
         vpvsm->start_pending = false;
+        vpvsm->started = false;
         vpvsm->reset_gen++;
         setup_hypercall_page(cs, 0);
         setup_vp_assist(cs, 0);
@@ -691,6 +694,7 @@ static void vp_start_work(CPUState *leader, run_on_cpu_data arg)
     load_vp_context(w->target, &w->ctx, w->enable_spiv, w->input_gpa);
     cpu_synchronize_post_reset(w->target);
     w->start->halted = 0;
+    w->vpvsm->started = true;
     w->vpvsm->start_pending = false;
     g_free(w);
 }
@@ -2720,13 +2724,18 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
         return HV_STATUS_INVALID_VP_STATE;
     }
 
+    /*
+     * A processor is not runnable until a start makes it so, and that start is
+     * the only writer of this mark: marked is running, unmarked is idle.
+     */
+    if (vpvsm->started) {
+        bql_unlock();
+        return HV_STATUS_INVALID_VP_STATE;
+    }
+
     for (i = MAX(input.target_vtl, 1) - 1; i >= 0; i--) {
         vcpu = hv_plane_vcpu(input.vp_index, i);
         if (!vcpu || cpu_is_bsp(X86_CPU(vcpu))) {
-            status = HV_STATUS_INVALID_VP_STATE;
-            goto out;
-        }
-        if (!vcpu->halted) {
             status = HV_STATUS_INVALID_VP_STATE;
             goto out;
         }
