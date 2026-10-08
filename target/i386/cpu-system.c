@@ -291,10 +291,10 @@ GuestPanicInformation *x86_cpu_get_crash_info(CPUState *cs)
                 warn_report("Hypervisor did not provide any data for SEV-ES termination");
             }
         }
-    } else
+    }
 #endif
 
-    if (hyperv_feat_enabled(cpu, HYPERV_FEAT_CRASH)) {
+    if (!panic_info && hyperv_feat_enabled(cpu, HYPERV_FEAT_CRASH)) {
         panic_info = g_new0(GuestPanicInformation, 1);
 
         panic_info->type = GUEST_PANIC_INFORMATION_TYPE_HYPER_V;
