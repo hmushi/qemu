@@ -3853,12 +3853,13 @@ int kvm_cpu_exec(CPUState *cpu)
             trace_kvm_memory_fault(run->memory_fault.gpa,
                                    run->memory_fault.size,
                                    run->memory_fault.flags);
-            if (run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_RWX) {
-                /* access restriction fault, not a private/shared mismatch */
+            if (run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE) {
+                /* plane/VTL protection fault; the RWX bits are informational */
                 ret = kvm_arch_handle_exit(cpu, run);
                 break;
             }
-            if (run->memory_fault.flags & ~KVM_MEMORY_EXIT_FLAG_PRIVATE) {
+            if (run->memory_fault.flags & ~(KVM_MEMORY_EXIT_FLAG_PRIVATE |
+                                            KVM_MEMORY_EXIT_FLAG_RWX)) {
                 error_report("KVM_EXIT_MEMORY_FAULT: Unknown flag 0x%" PRIx64,
                              (uint64_t)run->memory_fault.flags);
                 ret = -1;
