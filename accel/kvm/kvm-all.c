@@ -3786,6 +3786,11 @@ int kvm_cpu_exec(CPUState *cpu)
             if (kvm_shutdown_dump) {
                 kvm_shutdown_dump(faulted);
             }
+            /*
+             * The fault leaves the selection on the plane that took it, and
+             * the reset must not have to undo it.
+             */
+            kvm_plane_select(leader);
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             ret = EXCP_INTERRUPT;
             break;
