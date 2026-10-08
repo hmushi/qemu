@@ -170,9 +170,23 @@ CPUState *hv_plane_vcpu_create(uint32_t vp_index, int vtl)
     return cs;
 }
 
+/* reselects a leader's own plane at system reset, once per VP */
 static void select_plane_work(CPUState *leader, run_on_cpu_data arg)
 {
-    kvm_plane_select(arg.host_ptr);
+    CPUState *sel = arg.host_ptr;
+
+    trace_hyperv_vsm_plane_selected(hyperv_vp_index(sel), sel->kvm_plane,
+                                    "reset");
+    kvm_plane_select(sel);
+}
+
+/* on the target's own thread, as the first step of a start */
+void hv_plane_select_start(CPUState *start)
+{
+    assert(qemu_cpu_is_self(start->kvm_plane_leader ?: start));
+    trace_hyperv_vsm_plane_selected(hyperv_vp_index(start), start->kvm_plane,
+                                    "start");
+    kvm_plane_select(start);
 }
 
 void hv_plane_reset(void)
@@ -198,21 +212,6 @@ void hv_plane_reset(void)
     }
 }
 
-int hv_plane_vcpu_start(uint32_t vp_index, int start_vtl)
-{
-    CPUState *cs = hv_plane_vcpu(vp_index, start_vtl);
-
-    if (!cs) {
-        return -ENOENT;
-    }
-
-    trace_hyperv_vsm_plane_vcpu_start(vp_index, start_vtl);
-    cs->halted = 0;
-    /* the kick ends the VP thread's KVM_RUN; it then runs @cs */
-    run_on_cpu(cs->kvm_plane_leader ? cs->kvm_plane_leader : cs,
-               select_plane_work, RUN_ON_CPU_HOST_PTR(cs));
-    return 0;
-}
 
 int hv_plane_set_memory_attrs(int vtl, hwaddr addr, hwaddr size, uint64_t attrs)
 {
@@ -364,6 +363,8 @@ int hv_plane_run_vtl(CPUState *cs, int target_vtl, HvPlaneSwitchReason reason)
     /* the kernel reports lower interrupts afresh after a switch (no re-arm) */
     target->kvm_plane_vina_armed = hyperv_vsm_vina_armed(target);
     target->halted = 0;
+    trace_hyperv_vsm_plane_selected(hyperv_vp_index(target),
+                                    target->kvm_plane, "vtl-switch");
     kvm_plane_select(target);
 
     /* leave this plane's run loop; the thread picks up @target */

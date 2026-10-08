@@ -63,6 +63,10 @@ struct VpVsmState {
     union hv_register_vsm_vp_secure_vtl_config vtl_config[HV_NUM_VTLS];
     uint64_t msr_hv_vp_assist;
     HvSintRoute *intercept_route;
+    /* a start is queued on this processor's thread and has not run yet */
+    bool start_pending;
+    /* bumped at every system reset, so a queued start can tell it is stale */
+    unsigned reset_gen;
     struct hyperv_message intercept_msg;
     /* HvRegisterVsmVina (TLFS 15.6.5) */
     union hv_register_vsm_vina vina;
@@ -96,9 +100,23 @@ static uint32_t desc_load_exit_bits(union hv_register_cr_intercept_control ctl)
 #define TYPE_VP_VSM "hyperv-vp-vsm"
 OBJECT_DECLARE_SIMPLE_TYPE(VpVsmState, VP_VSM)
 
+/*
+ * A queued start has not loaded its context, so these registers are not the
+ * ones it supplied. Reading them would also block on the target's thread.
+ */
+static bool vp_start_pending(uint32_t vp_index);
+
 static VpVsmState *get_vp_vsm(CPUState *cs)
 {
     return VP_VSM(object_resolve_path_component(OBJECT(cs), "vp-vsm"));
+}
+
+static bool vp_start_pending(uint32_t vp_index)
+{
+    CPUState *cs = hv_plane_vcpu(vp_index, 0);
+    VpVsmState *vpvsm = cs ? get_vp_vsm(cs) : NULL;
+
+    return vpvsm && vpvsm->start_pending;
 }
 
 static int active_vtl(CPUState *cs)
@@ -379,6 +397,8 @@ static void hyperv_vsm_reset(void *opaque)
         if (!vpvsm) {
             continue;
         }
+        vpvsm->start_pending = false;
+        vpvsm->reset_gen++;
         setup_hypercall_page(cs, 0);
         setup_vp_assist(cs, 0);
         /* kvm_put_msrs() skips this MSR under VSM: the filter path owns it */
@@ -565,6 +585,16 @@ static void apic_force_enable_spiv(CPUState *cs)
  * touched because it lives inside the INIT-preserved window of CPUX86State
  * and so survived the old path too.
  */
+typedef struct VpStartWork {
+    struct hv_init_vp_context ctx;
+    CPUState *target;
+    CPUState *start;
+    VpVsmState *vpvsm;
+    unsigned reset_gen;
+    bool enable_spiv;
+    hwaddr input_gpa;
+} VpStartWork;
+
 static void reset_vp_scratch_regs(CPUState *cs)
 {
     CPUX86State *env = &X86_CPU(cs)->env;
@@ -641,6 +671,28 @@ static void load_vp_context(CPUState *cs, const struct hv_init_vp_context *c,
     assert(env->idt.limit == c->idtr.limit);
     assert(env->gdt.base == c->gdtr.base);
     assert(env->gdt.limit == c->gdtr.limit);
+}
+
+/* on the target's own thread, after its start plane has been selected */
+static void vp_start_work(CPUState *leader, run_on_cpu_data arg)
+{
+    VpStartWork *w = arg.host_ptr;
+
+    /*
+     * A reset between the queue and here has already reset this processor,
+     * so the context the start carried is pre-reset state.
+     */
+    if (w->reset_gen != w->vpvsm->reset_gen) {
+        g_free(w);
+        return;
+    }
+    hv_plane_select_start(w->start);
+    reset_vp_scratch_regs(w->target);
+    load_vp_context(w->target, &w->ctx, w->enable_spiv, w->input_gpa);
+    cpu_synchronize_post_reset(w->target);
+    w->start->halted = 0;
+    w->vpvsm->start_pending = false;
+    g_free(w);
 }
 
 static bool vp_assist_enabled(CPUState *cs)
@@ -1028,6 +1080,10 @@ uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param, bool fast)
     }
 
     bql_lock();
+    if (vp_start_pending(input.vp_index)) {
+        bql_unlock();
+        return HV_STATUS_INVALID_VP_STATE;
+    }
     load_vp_context(vtl_cpu, &input.vp_context, true, param);
     cpu_synchronize_post_reset(vtl_cpu);
     bql_unlock();
@@ -1652,6 +1708,12 @@ uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
                                                 hyperv_vp_index(cs));
 
     bql_lock();
+    if (vp_start_pending(input.vp_index)) {
+        bql_unlock();
+        return reject_vp_register_hcall(cs, "start in flight on the VP",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_VP_STATE);
+    }
     cpu_synchronize_state(target_vcpu);
     for (i = 0; i < nregs; i++) {
         status = set ?
@@ -1799,6 +1861,9 @@ uint64_t hyperv_hcall_translate_virtual_address(CPUState *cs,
         }
     }
 
+    if (vp_start_pending(input.vp_index)) {
+        return HV_STATUS_INVALID_VP_STATE;
+    }
     ret = hv_plane_translate(target_vcpu, &tr);
     if (ret < 0) {
         qemu_log_mask(LOG_UNIMP, "hyperv-vsm: KVM_TRANSLATE2 failed: %d\n",
@@ -2596,9 +2661,10 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
     uint8_t current_vtl = active_vtl(cs);
     uint64_t status = HV_STATUS_SUCCESS;
     struct hv_enable_vp_vtl input;
+    CPUState *vcpu, *start_cpu;
     uint8_t start_vtl;
     VpVsmState *vpvsm;
-    CPUState *vcpu;
+    VpStartWork *work;
     int i;
 
     /* TLFS 15.5.9: neither fast nor rep */
@@ -2642,8 +2708,17 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
      * for every VTL below the target, and for VTL0 itself when that is the
      * target, which is how Windows starts a processor.
      */
-    /* run_on_cpu() on a vCPU other than this one needs the BQL */
+    /* queueing work on a vCPU other than this one needs the BQL */
     bql_lock();
+
+    /*
+     * The start runs later on the target's thread, so until it does these
+     * registers are not the ones supplied. Refuse a second start.
+     */
+    if (vpvsm->start_pending) {
+        bql_unlock();
+        return HV_STATUS_INVALID_VP_STATE;
+    }
 
     for (i = MAX(input.target_vtl, 1) - 1; i >= 0; i--) {
         vcpu = hv_plane_vcpu(input.vp_index, i);
@@ -2651,14 +2726,7 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
             status = HV_STATUS_INVALID_VP_STATE;
             goto out;
         }
-        cpu_synchronize_state(vcpu);
-        switch (X86_CPU(vcpu)->env.mp_state) {
-        case KVM_MP_STATE_UNINITIALIZED:
-        case KVM_MP_STATE_INIT_RECEIVED:
-        case KVM_MP_STATE_HALTED:
-        case KVM_MP_STATE_STOPPED:
-            break;
-        default:
+        if (!vcpu->halted) {
             status = HV_STATUS_INVALID_VP_STATE;
             goto out;
         }
@@ -2692,15 +2760,25 @@ uint64_t hyperv_hcall_start_virtual_processor(CPUState *cs,
      * SPIV is forced on for a VTL>0 VP, whose secure kernel expects an
      * enabled APIC; a VTL0 VP enables its own, as after a SIPI.
      */
-    reset_vp_scratch_regs(vcpu);
-    load_vp_context(vcpu, &input.vp_context, input.target_vtl > 0,
-                    exit->u.hcall.params[0]);
-    cpu_synchronize_post_reset(vcpu);
-
     start_vtl = highest_vtl(vpvsm->vp_status.enabled_vtl_set);
-    if (hv_plane_vcpu_start(input.vp_index, start_vtl)) {
+    start_cpu = hv_plane_vcpu(input.vp_index, start_vtl);
+    if (!start_cpu) {
         status = HV_STATUS_INVALID_VP_STATE;
+        goto out;
     }
+
+    work = g_new(VpStartWork, 1);
+    work->target = vcpu;
+    work->start = start_cpu;
+    work->vpvsm = vpvsm;
+    work->reset_gen = vpvsm->reset_gen;
+    work->ctx = input.vp_context;
+    work->enable_spiv = input.target_vtl > 0;
+    work->input_gpa = exit->u.hcall.params[0];
+    trace_hyperv_vsm_plane_vcpu_start(input.vp_index, start_vtl);
+    work->vpvsm->start_pending = true;
+    async_run_on_cpu(start_cpu->kvm_plane_leader ?: start_cpu, vp_start_work,
+                     RUN_ON_CPU_HOST_PTR(work));
 
 out:
     bql_unlock();

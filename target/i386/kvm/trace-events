@@ -52,6 +52,7 @@ hyperv_vsm_hcall_start_virtual_processor(uint64_t partition_id, uint32_t vp_inde
 hyperv_vsm_plane_create(int vtl, int ret) "VTL%d plane created: %d"
 hyperv_vsm_plane_vcpu_create(uint32_t vp_index, int vtl, bool ok) "VP %u VTL%d created: %d"
 hyperv_vsm_plane_vcpu_start(uint32_t vp_index, int vtl) "VP %u starts in VTL%d"
+hyperv_vsm_plane_selected(uint32_t vp_index, int plane, const char *why) "VP %u plane %d selected: %s"
 hyperv_vsm_plane_vcpu_reset(uint32_t vp_index, int vtl, uint64_t rip, uint64_t cr0, uint32_t idt_limit) "VP %u VTL%d before its reset: rip 0x%" PRIx64 " cr0 0x%" PRIx64 " idt limit 0x%x"
 hyperv_vsm_enable_vp_vtl_reject(const char *why, uint32_t vp_index, uint8_t vtl) "rejected: %s (VP %u VTL%u)"
 hyperv_vsm_hypercall_msr_read(uint32_t vp_index, int vtl, uint64_t val) "VP %u VTL%d HYPERCALL 0x%" PRIx64
