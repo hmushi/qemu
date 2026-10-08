@@ -711,6 +711,9 @@ void hv_plane_export_shared_state(CPUState *cs, HvVtlSharedState *st)
 void hv_plane_import_shared_state(CPUState *cs, const HvVtlSharedState *st)
 {
     CPUX86State *env = &X86_CPU(cs)->env;
+    /*
+     * RSP stays with the plane, so env must hold the live value here.
+     */
     target_ulong rsp = env->regs[R_ESP];
     uint64_t val;
 
