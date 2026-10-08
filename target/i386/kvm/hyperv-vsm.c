@@ -64,6 +64,8 @@ struct VpVsmState {
     uint64_t msr_hv_vp_assist;
     /* HvRegisterVpConfig, stored only */
     uint64_t vp_config;
+    /* the register at 0x00090005, stored only */
+    uint64_t undocumented_90005;
     HvSintRoute *intercept_route;
     /* a start is queued on this processor's thread and has not run yet */
     bool start_pending;
@@ -457,6 +459,7 @@ static void hyperv_vsm_reset(void *opaque)
         vpvsm->cr_intercept_misc_enable_mask = 0;
         vpvsm->intercepts_unposted = 0;
         vpvsm->vp_config = 0;
+        vpvsm->undocumented_90005 = 0;
         vpvsm->synic_traced = false;
         if (desc_load_exit_mask) {
             run_on_cpu(cs, disarm_desc_load_work, RUN_ON_CPU_NULL);
@@ -1420,6 +1423,9 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
     case HV_REGISTER_VP_CONFIG:
         val->low_part = vpvsm->vp_config;
         break;
+    case HV_REGISTER_UNDOCUMENTED_90005:
+        val->low_part = vpvsm->undocumented_90005;
+        break;
     case HV_REGISTER_VSM_CODE_PAGE_OFFSETS:
         val->low_part = hv_vsm.code_page_offsets.as_uint64;
         break;
@@ -1640,6 +1646,9 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         break;
     case HV_REGISTER_VP_CONFIG:
         get_vp_vsm(target_vcpu)->vp_config = val->low_part;
+        return HV_STATUS_SUCCESS;
+    case HV_REGISTER_UNDOCUMENTED_90005:
+        get_vp_vsm(target_vcpu)->undocumented_90005 = val->low_part;
         return HV_STATUS_SUCCESS;
     case HV_REGISTER_VSM_VINA:
         set_vina(target_vcpu, val->low_part);
