@@ -1544,6 +1544,12 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
     case HV_X64_REGISTER_GS:
         memcpy(&seg, val, sizeof(seg));
         set_seg(&env->segs[hv_seg_index(name)], &seg);
+        /* the MSR half of the next put reads the mirrored field */
+        if (name == HV_X64_REGISTER_FS) {
+            env->fsbase = seg.base;
+        } else if (name == HV_X64_REGISTER_GS) {
+            env->gsbase = seg.base;
+        }
         break;
     case HV_X64_REGISTER_LDTR:
         memcpy(&seg, val, sizeof(seg));
