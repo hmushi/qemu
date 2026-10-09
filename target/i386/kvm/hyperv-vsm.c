@@ -2217,13 +2217,11 @@ void hyperv_vsm_dump_protections(CPUState *cs)
              " (exiting plane, synchronised read)\n", vtl, total, denied);
 
     /*
-     * KVM_EXIT_SHUTDOWN carries no address, and cr2 reads zero on every fault
-     * captured with the corrected register read, so there is no fault address
-     * to translate. Print it anyway, because an omitted field reads as an
-     * absent one, but the delivery path below is what carries the signal.
+     * On SVM the vCPU is reset before KVM_EXIT_SHUTDOWN is delivered, so cr2
+     * and cr3 read as reset state and carry no fault information.
      */
-    qemu_log("hyperv-vsm: faulting gpa: not carried by this exit; cr2=0x%"
-             PRIx64 " (zero on every corrected capture so far)\n",
+    qemu_log("hyperv-vsm: faulting gpa: lost to the reset before this exit; "
+             "cr2=0x%" PRIx64 " is reset state\n",
              (uint64_t)env->cr[2]);
 
     /* cr3 is physical, so it can be tested; the table bases are linear */
