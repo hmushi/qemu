@@ -96,8 +96,10 @@ struct kvm_hyperv_exit {
 #define KVM_EXIT_HYPERV_SYNIC          1
 #define KVM_EXIT_HYPERV_HCALL          2
 #define KVM_EXIT_HYPERV_SYNDBG         3
+#define KVM_EXIT_HYPERV_VTL_INTERRUPT  4
+#define KVM_EXIT_HYPERV_REG_INTERCEPT  5
 	__u32 type;
-	__u32 pad1;
+	__u32 plane;
 	union {
 		struct {
 			__u32 msr;
@@ -111,6 +113,15 @@ struct kvm_hyperv_exit {
 			__u64 result;
 			__u64 params[2];
 		} hcall;
+		struct {
+			__u32 reg;
+			__u8 insn_len;
+			__u8 pad[3];
+			__u64 base;
+			__u32 limit;
+			__u32 pad2;
+			__u64 rip;
+		} reg_intercept;
 		struct {
 			__u32 msr;
 			__u32 pad2;
@@ -454,10 +465,18 @@ struct kvm_run {
 		} notify;
 		/* KVM_EXIT_MEMORY_FAULT */
 		struct {
+#define KVM_MEMORY_EXIT_FLAG_READ	(1ULL << 0)
+#define KVM_MEMORY_EXIT_FLAG_WRITE	(1ULL << 1)
+#define KVM_MEMORY_EXIT_FLAG_EXEC	(1ULL << 2)
 #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
+#define KVM_MEMORY_EXIT_FLAG_GVA_VALID	(1ULL << 4)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
+			__u64 gva;
+			__u32 insn_len;
+			__u8  insn_bytes[16];
+			__u32 pad;
 		} memory_fault;
 		/* KVM_EXIT_TDX */
 		struct {
@@ -1001,7 +1020,11 @@ struct kvm_enable_cap {
 #define KVM_CAP_S390_KEYOP 247
 #define KVM_CAP_S390_VSIE_ESAMODE 248
 #define KVM_CAP_S390_HPAGE_2G 249
-#define KVM_CAP_PLANES 250
+#define KVM_CAP_PLANES 249
+#define KVM_CAP_HYPERV_FORWARD_HCALL 250
+#define KVM_CAP_HYPERV_VTL_SWITCH 253
+#define KVM_CAP_HYPERV_REG_INTERCEPT 254
+#define KVM_HV_HCALL_RESULT_RAISE_UD	(1ULL << 63)
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
@@ -1356,6 +1379,18 @@ struct kvm_s390_keyop {
 #define KVM_HAS_DEVICE_ATTR	  _IOW(KVMIO,  0xe3, struct kvm_device_attr)
 
 #define KVM_CREATE_PLANE	  _IO(KVMIO, 0xe4)
+#define KVM_GET_PLANE_RUN_STATE	  _IOR(KVMIO, 0xe5, __u32)
+#define KVM_SET_PLANE_RUN_STATE	  _IOW(KVMIO, 0xe6, __u32)
+
+struct kvm_plane_memory_overlay {
+	__u32 plane;
+	__u32 flags;
+	__u64 gfn;
+	__u64 uaddr;
+};
+#define KVM_SET_PLANE_MEMORY_OVERLAY	  _IOW(KVMIO, 0xe7, struct kvm_plane_memory_overlay)
+#define   KVM_PLANE_RUN_STATE_STOPPED	0
+#define   KVM_PLANE_RUN_STATE_RUNNABLE	1
 
 /*
  * ioctls for vcpu fds
@@ -1652,6 +1687,9 @@ struct kvm_memory_attributes {
 	__u64 flags;
 };
 
+#define KVM_MEMORY_ATTRIBUTE_NR		       (1ULL << 0)
+#define KVM_MEMORY_ATTRIBUTE_NW		       (1ULL << 1)
+#define KVM_MEMORY_ATTRIBUTE_NX		       (1ULL << 2)
 #define KVM_MEMORY_ATTRIBUTE_PRIVATE           (1ULL << 3)
 
 #define KVM_CREATE_GUEST_MEMFD	_IOWR(KVMIO,  0xd4, struct kvm_create_guest_memfd)
