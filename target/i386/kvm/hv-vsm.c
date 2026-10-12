@@ -146,6 +146,18 @@ void hv_vsm_reset(struct hv_vsm *vsm)
             (vsm->vp[i].secure_config_vtl0 & HV_VSM_SECURE_CONFIG_TLB_LOCKED)) {
             vsm->ops->vcpu_set_tlb_flush_inhibit(vsm->vm, 0, i, false);
         }
+        /*
+         * Disarm the kernel-side register intercepts along with the
+         * stored control word: a guest that re-enables VSM after the
+         * reboot must not run with the last boot's intercepts armed
+         * before its secure kernel asks for any, and one that does not
+         * re-enable VSM must not keep taking descriptor-table exits
+         * with no VTL to deliver them to.
+         */
+        if (vsm->ops->vcpu_arm_reg_intercepts &&
+            vsm->vp[i].cr_intercept_control) {
+            vsm->ops->vcpu_arm_reg_intercepts(vsm->vm, i, 0);
+        }
         memset(&vsm->vp[i], 0, sizeof(vsm->vp[i]));
         vsm->vp[i].enabled_vtl_set = 1; /* VTL0 */
     }
