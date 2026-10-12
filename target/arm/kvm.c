@@ -1227,6 +1227,11 @@ void kvm_arm_reset_vcpu(ARMCPU *cpu)
      * run the vCPU, so a guest-triggered reset runs them on the owning
      * thread. A cold reset precedes that thread and runs inline.
      */
+    fprintf(stderr, "R2NRESET cpu=%d plane=%d owner=%d owner_created=%d"
+            " self=%d route=%s\n", cs->cpu_index, cs->kvm_plane,
+            owner->cpu_index, owner->created,
+            owner->created ? qemu_cpu_is_self(cs) : -1,
+            owner->created ? "run_on_cpu" : "inline");
 
     if (owner->created) {
         run_on_cpu(cs, kvm_arm_reset_vcpu_work, RUN_ON_CPU_NULL);
@@ -1633,6 +1638,8 @@ static int kvm_arm_handle_hypercall(CPUState *cs, struct kvm_run *run)
 
         cpu_synchronize_state(cs);
         r2_ctrl_hits++;
+        fprintf(stderr, "R2CTRL hit #%d (writes to .text are seen)\n",
+                r2_ctrl_hits);
         cpu_memory_rw_debug(cs, r2_ctrl_addr, (uint8_t *)&r2_ctrl_orig, 4,
                             true);
         env->pc = r2_ctrl_addr;
@@ -1789,6 +1796,7 @@ static void hv_vp_start_work(CPUState *cs, run_on_cpu_data arg)
     env->cp15.ttbr1_el[1] = w->in.ttbr1_el1;
     pstate_write(env, PSTATE_MODE_EL1h | PSTATE_DAIF);
     env->aarch64 = 1;
+    fprintf(stderr, "R2START vp=%u plane=%d want_pc=0x%llx got_pc=0x%llx want_sp=0x%llx\n", hyperv_vp_index(cs), cs->kvm_plane, (unsigned long long)w->in.pc, (unsigned long long)env->pc, (unsigned long long)w->in.sp_elh);
 
     arm_set_cpu_power_state(cpu, PSCI_ON);
     cs->halted = 0;
@@ -2184,6 +2192,10 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
                     memcpy(pg + 16, &offset, 8);
                     address_space_write(&address_space_memory, gpa,
                                         MEMTXATTRS_UNSPECIFIED, pg, sizeof(pg));
+                    fprintf(stderr, "r1_hv_hcall: 0x90017 ReferenceTsc gpa=0x%" PRIx64
+                            " cntfrq=%" PRIu64 " scale=0x%" PRIx64 " cntvct=0x%" PRIx64
+                            " tref=0x%" PRIx64 " off=0x%" PRIx64 "\n",
+                            (uint64_t)gpa, cntfrq, scale, cntvct, tref, (uint64_t)offset);
                 }
             }
         } else if (r) {
@@ -2770,6 +2782,7 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
                         r2_ctrl_orig == 0xd503237f /* paciasp */) {
                         cpu_memory_rw_debug(cs, ca, (uint8_t *)&hvc5, 4, true);
                         r2_ctrl_addr = ca;
+                        fprintf(stderr, "R2CTRL armed at 0x%" PRIx64 "\n", ca);
                     }
                 }
             } else {

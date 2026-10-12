@@ -378,8 +378,10 @@ void msi_notify(PCIDevice *dev, unsigned int vector)
 
 void msi_send_message(PCIDevice *dev, MSIMessage msg)
 {
+    fprintf(stderr, "R6TRIG dev=%s addr=0x%llx data=0x%x trig=%p\n", object_get_typename(OBJECT(dev)), (unsigned long long)msg.address, (unsigned)msg.data, (void *)dev->msi_trigger);
     if (msg.address == 0 && kvm_irqchip_in_kernel()) {
         MSIMessage m2 = { .address = 0x08090040ULL, .data = msg.data };
+        fprintf(stderr, "R6ENLMSI dev=%s data=0x%x devid=0x%x\n", object_get_typename(OBJECT(dev)), (unsigned)msg.data, pci_requester_id(dev));
         kvm_irqchip_send_msi_devid(kvm_state, m2, pci_requester_id(dev));
         return;
     }

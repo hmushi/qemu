@@ -357,6 +357,7 @@ int hv_plane_arch_switch_state(CPUState *cs, CPUState *target,
 
     bql_lock();
     move_shared_state(cs, target);
+    if (reason == HV_PLANE_SWITCH_VTL_RETURN) fprintf(stderr, "R2VTLRET vp=%u from_plane=%d to_plane=%d to_pc=0x%llx\n", hyperv_vp_index(cs), cs->kvm_plane, target->kvm_plane, (unsigned long long)next_env->pc);
     if (reason == HV_PLANE_SWITCH_VTL_RETURN && hyperv_vp_index(cs) != 0) {
         static uint32_t r2order_seen;
         uint32_t vp = hyperv_vp_index(cs);
@@ -384,6 +385,16 @@ int hv_plane_arch_switch_state(CPUState *cs, CPUState *target,
             mr2 = address_space_read(target->as,
                                      base2k + (uint64_t)idx256 * 8,
                                      MEMTXATTRS_UNSPECIFIED, &e256, 8);
+            fprintf(stderr, "R2ORDER vp=%u firstVTLRET ttbr1=0x%llx tcr=0x%llx "
+                    "t1sz=%u pc=0x%llx base4k=0x%llx mr=%d/%d nz512=%d "
+                    "idx512=%u L0_4k=0x%llx base2k=0x%llx idx256=%u "
+                    "L0_2k=0x%llx\n",
+                    vp, (unsigned long long)ttbr1, (unsigned long long)tcr,
+                    t1sz, (unsigned long long)pc, (unsigned long long)base4k,
+                    (int)mr1, (int)mr2, nz, idx512,
+                    (unsigned long long)l0page[idx512],
+                    (unsigned long long)base2k, idx256,
+                    (unsigned long long)e256);
         }
     }
 
@@ -851,6 +862,12 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
         page.tsc_offset = off;
         vpvsm->ref_tsc_gpa = gpa;
         vsm_physmem_write(target_vcpu, gpa, &page, sizeof(page));
+        fprintf(stderr, "R4aTSC vp=%u vtl=%d gpa=0x%llx cntfrq=%llu "
+                "scale=0x%llx cnt=0x%llx off=0x%llx\n",
+                hyperv_vp_index(target_vcpu), target_vcpu->kvm_plane,
+                (unsigned long long)gpa, (unsigned long long)cntfrq,
+                (unsigned long long)scale, (unsigned long long)cnt,
+                (unsigned long long)off);
         return HV_STATUS_SUCCESS;
     }
     case HV_REGISTER_VSM_VINA:

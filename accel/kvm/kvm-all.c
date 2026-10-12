@@ -2552,6 +2552,7 @@ int kvm_irqchip_send_msi(KVMState *s, MSIMessage msg)
 
     {
         int _r6 = kvm_vm_ioctl(s, KVM_SIGNAL_MSI, &msi);
+        fprintf(stderr, "R6SENDMSI addr=0x%llx data=0x%x ret=%d\n", (unsigned long long)msg.address, (unsigned)msg.data, _r6);
         return _r6;
     }
 }
@@ -3844,6 +3845,7 @@ int kvm_cpu_exec(CPUState *cpu)
             break;
         case KVM_EXIT_SYSTEM_EVENT:
             trace_kvm_run_exit_system_event(cpu->cpu_index, run->system_event.type);
+            fprintf(stderr, "R1RESET cpu=%d type=%u data0=0x%llx\n", cpu->cpu_index, run->system_event.type, (unsigned long long)run->system_event.data[0]);
             switch (run->system_event.type) {
             case KVM_SYSTEM_EVENT_SHUTDOWN:
                 qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
