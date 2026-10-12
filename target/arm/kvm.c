@@ -1815,6 +1815,7 @@ static struct r1_hv_reg r1_hv_store[] = {
     { 0x90007, 0 }, /* CPU_MANAGEMENT_VERSION */
     { 0x90015, 0 }, /* partition info page: last value the guest published */
     { 0x90016, 0 }, /* partition info group, adjacent to 0x90015: plain store */
+    { 0x90017, 0 }, /* R4 gate-2: VP-info group member, adjacent to 0x90016: plain store */
     { 0x40400, 0 }, /* SyntheticVbarEl1: guest EL1 vector base VA, plain store */
     /*
      * Written by HvlConfigureMemoryZeroingOnReset. Not named in the TLFS or
@@ -1975,7 +1976,7 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
                                      * AccessVsm (EBX bit 16, here 48) and
                                      * AccessVpRegisters (17, here 49), and
                                      * StartVirtualProcessor (21, here 53). */
-            lo = virt_hv_vsm() ? (1ULL << 48) | (1ULL << 49) |
+            lo = virt_hv_vsm() ? (1ULL << 1) | (1ULL << 9) | (1ULL << 48) | (1ULL << 49) |
                                     (1ULL << 53) : 0;
             { /* R2 probe: extra privilege bits from the environment */
                 const char *e = getenv("QEMU_HV_PRIV_EXTRA");
@@ -2156,6 +2157,34 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
                         " acknowledged, not aliased: GPA beyond the guest"
                         " physical address space; GET reports the overlay\n",
                         x[5]);
+            }
+        } else if (name == 0x90017) {
+            /* R6: HvRegisterReferenceTsc. Populate the reference TSC page so
+             * the guest reads time from CNTVCT (fast) instead of the slow
+             * TimeRefCount hypercall fallback (which inflates IRQ-masked timed
+             * measurements and wedges early boot). Page: {u32 seq; u32 rsvd;
+             * u64 scale; s64 offset; ...}. */
+            hwaddr gpa = x[5] & ~(hwaddr)0xfff;
+            r->val = x[5];
+            status = HV_STATUS_SUCCESS;
+            if (x[5] & 1) {
+                uint64_t cntfrq = ARM_CPU(cs)->gt_cntfrq_hz;
+                if (cntfrq) {
+                    uint8_t pg[40] = {0};
+                    uint32_t seq = 1;
+                    uint64_t scale = (uint64_t)(((__uint128_t)10000000ULL << 64) / cntfrq);
+                    uint64_t cntvct = 0;
+                    uint64_t tref = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 100;
+                    int64_t offset;
+                    kvm_get_one_reg(cs, KVM_REG_ARM_TIMER_CNT, &cntvct);
+                    offset = (int64_t)tref -
+                             (int64_t)(uint64_t)(((__uint128_t)cntvct * scale) >> 64);
+                    memcpy(pg + 0, &seq, 4);
+                    memcpy(pg + 8, &scale, 8);
+                    memcpy(pg + 16, &offset, 8);
+                    address_space_write(&address_space_memory, gpa,
+                                        MEMTXATTRS_UNSPECIFIED, pg, sizeof(pg));
+                }
             }
         } else if (r) {
             if (name == 0x270 && !r->val) {

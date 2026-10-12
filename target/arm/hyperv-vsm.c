@@ -44,6 +44,7 @@
 #include "cpu.h"
 #include "internals.h"
 #include "system/memory.h"
+#include <linux/kvm.h>  /* KVM_REG_ARM_TIMER_CNT */
 #include "exec/memattrs.h"
 #include "hyperv-arm.h"
 #include "hyperv-vsm.h"
@@ -615,6 +616,9 @@ static uint16_t get_vp_register(uint32_t name, struct hv_u128 *val,
     case HV_REGISTER_UNDOCUMENTED_90005:
         val->low_part = vpvsm->undocumented_90005;
         break;
+    case HV_REGISTER_REFERENCE_TSC:
+        val->low_part = vpvsm->msr_hv_tsc;
+        break;
     case HV_REGISTER_VSM_VINA:
         val->low_part = vpvsm->vina.as_uint64;
         break;
@@ -697,9 +701,10 @@ static void arm_stimer_update(CPUState *cs, int n)
 {
     VpVsmState *vpvsm = get_vp_vsm(cs);
     uint64_t cfg = vpvsm->stimer_config[n];
+    uint64_t cnt = vpvsm->stimer_count[n];
     bool enable = (cfg & 1) || ((cfg >> 3) & 1);
 
-    if (enable) { /* auto_enable configs arm without a Count write */
+    if (enable && cnt) { /* R4a: arm only when the guest set a Count */
         if (!vpvsm->stimer_qt[n]) {
             ArmStimerCtx *c = g_new0(ArmStimerCtx, 1);
             c->cs = cs;
@@ -707,7 +712,8 @@ static void arm_stimer_update(CPUState *cs, int n)
             vpvsm->stimer_qt[n] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                                arm_stimer_cb, c);
         }
-        ; /* R3o no-fire: stimer accepted, never armed */
+        timer_mod((QEMUTimer *)vpvsm->stimer_qt[n],
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
     } else if (vpvsm->stimer_qt[n]) {
         timer_del((QEMUTimer *)vpvsm->stimer_qt[n]);
     }
@@ -805,6 +811,48 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
     case HV_REGISTER_UNDOCUMENTED_90005:
         vpvsm->undocumented_90005 = val->low_part;
         return HV_STATUS_SUCCESS;
+    case HV_REGISTER_REFERENCE_TSC: {
+        /*
+         * Publish the reference-time page the guest reads through
+         * cntvct_el0. On ARM64 the Hyper-V reference TSC is the virtual
+         * counter: the page holds {sequence, scale, offset} and the guest
+         * computes (cntvct * scale >> 64) + offset in 100 ns units. With
+         * the page present QueryPerformanceCounter takes its fast path
+         * instead of the TIME_REF_COUNT hypercall.
+         */
+        uint64_t v = val->low_part;
+        uint64_t gpa = v & ~0xfffULL;
+        uint64_t cntfrq = cpu->gt_cntfrq_hz ? cpu->gt_cntfrq_hz
+                                            : GTIMER_DEFAULT_HZ;
+        uint64_t scale = (uint64_t)(((__uint128_t)10000000ULL << 64) /
+                                    cntfrq);
+        uint64_t cnt = 0;
+        int64_t off = 0;
+        struct {
+            uint32_t sequence;
+            uint32_t reserved;
+            uint64_t tsc_scale;
+            int64_t tsc_offset;
+            uint8_t pad[40];
+        } page;
+
+        vpvsm->msr_hv_tsc = v;
+        if (!(v & 1)) {
+            vpvsm->ref_tsc_gpa = 0;
+            return HV_STATUS_SUCCESS;
+        }
+        if (kvm_get_one_reg(target_vcpu, KVM_REG_ARM_TIMER_CNT, &cnt) == 0) {
+            off = (int64_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 100) -
+                  (int64_t)(uint64_t)(((__uint128_t)cnt * scale) >> 64);
+        }
+        memset(&page, 0, sizeof(page));
+        page.sequence = 1;
+        page.tsc_scale = scale;
+        page.tsc_offset = off;
+        vpvsm->ref_tsc_gpa = gpa;
+        vsm_physmem_write(target_vcpu, gpa, &page, sizeof(page));
+        return HV_STATUS_SUCCESS;
+    }
     case HV_REGISTER_VSM_VINA:
         r2o_synic_write_log(target_vcpu, name, val->low_part);
         vina_line(target_vcpu, false);
@@ -1266,6 +1314,8 @@ static void hyperv_vsm_arm_reset(void *opaque)
         vpvsm->intercepts_unposted = 0;
         vpvsm->vp_config = 0;
         vpvsm->undocumented_90005 = 0;
+        vpvsm->msr_hv_tsc = 0;
+        vpvsm->ref_tsc_gpa = 0;
         vpvsm->synic_traced = false;
         vpvsm->vp_status.as_uint64 = 0;
         vpvsm->vp_status.enabled_vtl_set = BIT(0);
