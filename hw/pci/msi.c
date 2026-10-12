@@ -378,6 +378,11 @@ void msi_notify(PCIDevice *dev, unsigned int vector)
 
 void msi_send_message(PCIDevice *dev, MSIMessage msg)
 {
+    if (msg.address == 0 && kvm_irqchip_in_kernel()) {
+        MSIMessage m2 = { .address = 0x08090040ULL, .data = msg.data };
+        kvm_irqchip_send_msi_devid(kvm_state, m2, pci_requester_id(dev));
+        return;
+    }
     dev->msi_trigger(dev, msg);
 }
 

@@ -2556,6 +2556,19 @@ int kvm_irqchip_send_msi(KVMState *s, MSIMessage msg)
     }
 }
 
+int kvm_irqchip_send_msi_devid(KVMState *s, MSIMessage msg, uint32_t devid)
+{
+    struct kvm_msi msi;
+
+    msi.address_lo = (uint32_t)msg.address;
+    msi.address_hi = msg.address >> 32;
+    msi.data = le32_to_cpu(msg.data);
+    msi.flags = KVM_MSI_VALID_DEVID;
+    msi.devid = devid;
+    memset(msi.pad, 0, sizeof(msi.pad));
+
+    return kvm_vm_ioctl(s, KVM_SIGNAL_MSI, &msi);
+}
 
 int kvm_irqchip_add_msi_route(AccelRouteChange *c, int vector, PCIDevice *dev)
 {

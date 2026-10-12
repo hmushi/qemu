@@ -422,6 +422,7 @@ int kvm_arch_msi_data_to_gsi(uint32_t data);
 
 int kvm_set_irq(KVMState *s, int irq, int level);
 int kvm_irqchip_send_msi(KVMState *s, MSIMessage msg);
+int kvm_irqchip_send_msi_devid(KVMState *s, MSIMessage msg, uint32_t devid);
 
 void kvm_irqchip_add_irq_route(KVMState *s, int gsi, int irqchip, int pin);
 
