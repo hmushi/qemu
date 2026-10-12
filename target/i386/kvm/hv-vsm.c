@@ -725,10 +725,12 @@ static void flush_pending_protections(struct hv_vsm *vsm, uint8_t owner_vtl)
 /*
  * HvCallTranslateVirtualAddress: translate a GVA in the target VTL's
  * address-space context.  The translation comes from the host's walker
- * for the target plane; HV_VSM_XLATE_GVA_VAL_WRITE is answered from the
- * walker's supervisor write-access report.  VAL_EXECUTE is not modelled
- * (KVM_TRANSLATE has no fetch walk); the reference host walks with
- * PFERR_FETCH there, so NX validation diverges until that is plumbed.
+ * for the target plane with the requested validation accesses folded
+ * into one supervisor-level walk, like the reference host's
+ * (BrimstoneLinux kvm_hv_xlate_va_walk, hyperv.c:4141-4151):
+ * HV_VSM_XLATE_GVA_VAL_WRITE adds a write check and VAL_EXECUTE a
+ * fetch check honouring NX/SMEP, so a mapping that fails any requested
+ * validation reports GVA_UNMAPPED exactly like a non-present one.
  */
 static uint64_t do_translate_virtual_address(struct hv_vsm *vsm,
                                              uint32_t caller,
@@ -753,7 +755,8 @@ static uint64_t do_translate_virtual_address(struct hv_vsm *vsm,
     } __hv_vsm_packed out;
     uint8_t target_vtl, flags;
     uint64_t gpa = 0;
-    bool valid = false, writeable = false;
+    bool valid = false;
+    unsigned access = 0;
     uint32_t vp;
 
     if (control & (HV_VSM_HYPERCALL_REP_COMP_MASK |
@@ -797,25 +800,24 @@ static uint64_t do_translate_virtual_address(struct hv_vsm *vsm,
         !(vsm->vp[caller].enabled_vtl_set & (1 << target_vtl))) {
         return mkstatus(HV_VSM_STATUS_INVALID_HYPERCALL_INPUT, 0);
     }
-    if (!vsm->ops->vcpu_translate ||
-        vsm->ops->vcpu_translate(vsm->vm, target_vtl, vp,
-                                 in.gva_page << 12, &gpa, &valid,
-                                 &writeable)) {
-        return mkstatus(HV_VSM_STATUS_INVALID_PARAMETER, 0);
+    if (flags & HV_VSM_XLATE_GVA_VAL_WRITE) {
+        access |= HV_VSM_TRANSLATE_WRITE;
+    }
+    if (flags & HV_VSM_XLATE_GVA_VAL_EXECUTE) {
+        access |= HV_VSM_TRANSLATE_EXECUTE;
     }
 
     /*
-     * The reference walks with the requested access rights folded into
-     * the page-table walk (hyperv.c:4141-4151), so a mapping that fails
-     * write validation reports GVA_UNMAPPED exactly like a non-present
-     * one.  GPA access rights (VTL protections) are not consulted,
-     * matching the reference hypervisor: the secure kernel translates
-     * pages it has itself write-protected in VTL0 (SkpgVerifyPage
-     * during AP start) and treats anything but success as a
-     * verification failure, aborting the AP start.
+     * GPA access rights (VTL protections) are not consulted, matching
+     * the reference hypervisor: the secure kernel translates pages it
+     * has itself write-protected in VTL0 (SkpgVerifyPage during AP
+     * start) and treats anything but success as a verification
+     * failure, aborting the AP start.
      */
-    if (valid && (flags & HV_VSM_XLATE_GVA_VAL_WRITE) && !writeable) {
-        valid = false;
+    if (!vsm->ops->vcpu_translate ||
+        vsm->ops->vcpu_translate(vsm->vm, target_vtl, vp,
+                                 in.gva_page << 12, access, &gpa, &valid)) {
+        return mkstatus(HV_VSM_STATUS_INVALID_PARAMETER, 0);
     }
 
     /*

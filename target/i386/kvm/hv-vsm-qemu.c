@@ -671,11 +671,61 @@ static bool vsm_vp_is_bsp(void *vm, uint32_t vp)
     return cs && X86_CPU(cs)->apic_id == 0;
 }
 
+/* KVM_TRANSLATE2 availability, probed once (constant for the VM's life). */
+static bool vsm_has_translate2(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        cached = kvm_check_extension(kvm_state, KVM_CAP_TRANSLATE2) > 0;
+    }
+    return cached;
+}
+
 static int vsm_vcpu_translate(void *vm, int plane, uint32_t vp, uint64_t gva,
-                              uint64_t *gpa, bool *valid, bool *writeable)
+                              unsigned access, uint64_t *gpa, bool *valid)
 {
     int fd = vsm_vcpu_fd(vm, plane, vp);
-    struct kvm_translation tr = {
+    struct kvm_translation tr;
+
+    if (vsm_has_translate2()) {
+        /*
+         * One walk with the requested accesses folded in, like the
+         * reference host's PFERR-based validation walk: WRITE maps to
+         * a write check, EXECUTE to a fetch check (NX/SMEP aware).
+         * A/D bits are set as a real walk would set them; the dirty
+         * bit only on a write walk (KVM rejects SET_DIRTY without
+         * ACCESS_WRITE).
+         */
+        struct kvm_translation2 tr2 = {
+            .linear_address = gva,
+            .flags = KVM_TRANSLATE_FLAGS_SET_ACCESSED,
+        };
+
+        if (access & HV_VSM_TRANSLATE_WRITE) {
+            tr2.access |= KVM_TRANSLATE_ACCESS_WRITE;
+            tr2.flags |= KVM_TRANSLATE_FLAGS_SET_DIRTY;
+        }
+        if (access & HV_VSM_TRANSLATE_EXECUTE) {
+            tr2.access |= KVM_TRANSLATE_ACCESS_EXEC;
+        }
+
+        if (vsm_vcpu_ioctl_on(vp, fd, KVM_TRANSLATE2, &tr2) < 0) {
+            return -EINVAL;
+        }
+        *gpa = tr2.physical_address;
+        *valid = tr2.valid;
+        return 0;
+    }
+
+    /*
+     * Fallback: KVM_TRANSLATE walks for supervisor read and reports a
+     * separate write-walk result in tr.writeable, which answers write
+     * validation.  It has no fetch walk, so execute validation
+     * degrades to the read result (the pre-KVM_TRANSLATE2 divergence
+     * from the reference host).
+     */
+    tr = (struct kvm_translation) {
         .linear_address = gva,
     };
 
@@ -683,10 +733,8 @@ static int vsm_vcpu_translate(void *vm, int plane, uint32_t vp, uint64_t gva,
         return -EINVAL;
     }
     *gpa = tr.physical_address;
-    *valid = tr.valid;
-    if (writeable) {
-        *writeable = tr.writeable;
-    }
+    *valid = tr.valid &&
+             (!(access & HV_VSM_TRANSLATE_WRITE) || tr.writeable);
     return 0;
 }
 
@@ -1312,8 +1360,7 @@ bool kvm_hv_vsm_handle_hcall(X86CPU *cpu, struct kvm_hyperv_exit *exit)
             bool valid = false;
 
             if (dbgcode == 0x11 && va &&
-                !vsm_vcpu_translate(&vsm_glue, 0, vp, va, &gpa, &valid,
-                                    NULL) &&
+                !vsm_vcpu_translate(&vsm_glue, 0, vp, va, 0, &gpa, &valid) &&
                 valid) {
                 last_sc_gpa = gpa;
             }

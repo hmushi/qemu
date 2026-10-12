@@ -436,14 +436,18 @@ struct hv_vsm_host_ops {
     uint64_t (*hcall_page_gpa)(void *vm, int plane, uint32_t vp);
 
     /*
-     * Translate a guest virtual address in the (plane, vp) context.
-     * Returns 0 with *gpa, *valid and *writeable set; nonzero on
-     * transport failure.  *writeable reports a supervisor-level write
-     * walk of the same address; it may be NULL when the caller only
-     * needs presence.
+     * Translate a guest virtual address in the (plane, vp) context,
+     * validating the requested accesses in the same supervisor-level
+     * walk (read access is implied; HV_VSM_TRANSLATE_WRITE adds a
+     * write check, HV_VSM_TRANSLATE_EXECUTE a fetch check honouring
+     * NX/SMEP).  Returns 0 with *gpa and *valid set; nonzero on
+     * transport failure.  *valid is false when the address is
+     * unmapped or any requested access fails its permission check.
      */
+#define HV_VSM_TRANSLATE_WRITE      (1u << 0)
+#define HV_VSM_TRANSLATE_EXECUTE    (1u << 1)
     int (*vcpu_translate)(void *vm, int plane, uint32_t vp, uint64_t gva,
-                          uint64_t *gpa, bool *valid, bool *writeable);
+                          unsigned access, uint64_t *gpa, bool *valid);
 
     /* VP index for an APIC ID; negative if no such processor. */
     int (*assert_interrupt)(void *vm, uint8_t vtl, uint64_t dest_mda,
