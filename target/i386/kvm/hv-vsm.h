@@ -131,6 +131,8 @@
 #define HV_VSM_REG_GUEST_OS_ID          0x00090002
 #define HV_VSM_REG_VP_ASSIST_PAGE       0x00090013
 #define HV_VSM_REG_VP_SECURE_CONFIG_VTL0 0x000D0010
+/* HvRegisterVsmVpSecureConfigVtlX: MbecEnabled bit 0, TlbLocked bit 1 */
+#define HV_VSM_SECURE_CONFIG_TLB_LOCKED (1ULL << 1)
 #define HV_VSM_X64_REG_PENDING_EVENT0   0x00010004
 #define HV_VSM_REG_DT_TRAPS             0x00090005
 #define HV_VSM_REG_REFERENCE_TSC        0x00090017
@@ -459,6 +461,15 @@ struct hv_vsm_host_ops {
                                  uint64_t size, uint64_t attrs);
     /* Arm lower-VTL register intercepts (HvRegisterCrInterceptControl). */
     int (*vcpu_arm_reg_intercepts)(void *vm, uint32_t vp, uint64_t control);
+
+    /*
+     * Arm or clear the kernel's Hyper-V TLB flush inhibit on (plane, vp):
+     * while armed, flush hypercalls from that plane targeting the vCPU
+     * suspend the caller (TLFS TlbLocked).  Optional; when absent or
+     * unsupported the lock is stored but inert, like the reference host.
+     */
+    int (*vcpu_set_tlb_flush_inhibit)(void *vm, int plane, uint32_t vp,
+                                      bool inhibit);
 
     /*
      * Make the partition-wide clock backing the Hyper-V reference time

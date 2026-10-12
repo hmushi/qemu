@@ -130,6 +130,10 @@ void hv_vsm_reset(struct hv_vsm *vsm)
     memset(vsm->thunked_pages, 0, sizeof(vsm->thunked_pages));
     vsm->nr_thunked = 0;
     for (i = 0; i < vsm->nr_vps; i++) {
+        if (vsm->ops->vcpu_set_tlb_flush_inhibit &&
+            (vsm->vp[i].secure_config_vtl0 & HV_VSM_SECURE_CONFIG_TLB_LOCKED)) {
+            vsm->ops->vcpu_set_tlb_flush_inhibit(vsm->vm, 0, i, false);
+        }
         memset(&vsm->vp[i], 0, sizeof(vsm->vp[i]));
         vsm->vp[i].enabled_vtl_set = 1; /* VTL0 */
     }
@@ -1567,9 +1571,28 @@ static int set_one_register(struct hv_vsm *vsm, uint32_t vp, uint8_t vtl,
         }
         return 0;
     }
-    case HV_VSM_REG_VP_SECURE_CONFIG_VTL0:
+    case HV_VSM_REG_VP_SECURE_CONFIG_VTL0: {
+        uint64_t old = vsm->vp[vp].secure_config_vtl0;
+
         vsm->vp[vp].secure_config_vtl0 = val[0];
+        /*
+         * TLFS: TlbLocked blocks the lower VTL's address-space flush
+         * hypercalls until the bit is cleared.  Arm the kernel's flush
+         * inhibit on the locked (VTL0) plane's vCPU; clearing it wakes
+         * the suspended flushers.  The reference host stores the bit
+         * without enforcing it; without kernel support this does the
+         * same.  TODO: a VTL return by the VP that set the lock should
+         * release the locks it holds (TLFS); with the in-kernel VTL
+         * switch the VMM does not see returns, so an explicit clear is
+         * required for now.
+         */
+        if (ops->vcpu_set_tlb_flush_inhibit &&
+            ((old ^ val[0]) & HV_VSM_SECURE_CONFIG_TLB_LOCKED)) {
+            ops->vcpu_set_tlb_flush_inhibit(vsm->vm, 0, vp,
+                    !!(val[0] & HV_VSM_SECURE_CONFIG_TLB_LOCKED));
+        }
         return 0;
+    }
     case HV_VSM_X64_REG_PENDING_EVENT0: {
         union hv_vsm_pending_event ev;
 

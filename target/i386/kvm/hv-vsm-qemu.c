@@ -840,6 +840,28 @@ static int vsm_vcpu_arm_reg_intercepts(void *vm, uint32_t vp, uint64_t control)
     return vsm_vcpu_ioctl_on(vp, fd, KVM_ENABLE_CAP, &cap) < 0 ? -EINVAL : 0;
 }
 
+/*
+ * TlbLocked: arm/clear the kernel's flush inhibit on the locked plane's
+ * vCPU.  Clearing synchronises and wakes the flushers the kernel
+ * suspended against this vCPU.  Without the capability the lock stays
+ * inert, matching the reference host.
+ */
+static int vsm_vcpu_set_tlb_flush_inhibit(void *vm, int plane, uint32_t vp,
+                                          bool inhibit)
+{
+    struct kvm_hyperv_tlb_flush_inhibit set = {
+        .inhibit = inhibit ? KVM_HYPERV_INHIBIT_TLB_FLUSH
+                           : KVM_HYPERV_UNINHIBIT_TLB_FLUSH,
+    };
+    int fd = vsm_vcpu_fd(vm, plane, vp);
+
+    if (!kvm_check_extension(kvm_state, KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT)) {
+        return 0;
+    }
+    return vsm_vcpu_ioctl_on(vp, fd, KVM_HYPERV_SET_TLB_FLUSH_INHIBIT,
+                             &set) < 0 ? -EINVAL : 0;
+}
+
 static int vsm_set_memory_attributes(void *vm, int plane, uint64_t gpa,
                                      uint64_t size, uint64_t attrs)
 {
@@ -909,6 +931,7 @@ static const struct hv_vsm_host_ops vsm_qemu_ops = {
     .hcall_page_gpa = vsm_hcall_page_gpa,
     .set_memory_attributes = vsm_set_memory_attributes,
     .vcpu_arm_reg_intercepts = vsm_vcpu_arm_reg_intercepts,
+    .vcpu_set_tlb_flush_inhibit = vsm_vcpu_set_tlb_flush_inhibit,
     .set_partition_clock = vsm_set_partition_clock,
     .log = vsm_log_op,
 };
