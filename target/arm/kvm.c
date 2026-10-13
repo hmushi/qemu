@@ -1951,6 +1951,14 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
             lo = ((uint64_t)0x000A0000 << 32) | 0x3839; /* ver 10.0 build 14393 */
             hi = 0;                                      /* sp / sb / sn = 0 */
             status = HV_STATUS_SUCCESS;
+        } else if (name == 0x90006) { /* Hypervisor interface id: the ARM64
+                                       * register behind x86 CPUID 0x40000001.
+                                       * ntoskrnl HviGetHypervisorInterface
+                                       * reads it via HvlQueryDetailInfo;
+                                       * "Hv#1" as target/i386/cpu.c sets. */
+            lo = 0x31237648;
+            hi = 0;
+            status = HV_STATUS_SUCCESS;
         } else if (name == 0x215) { /* GUEST_CRASH_CTL: crash notify available */
             lo = (1ULL << 63);
             status = HV_STATUS_SUCCESS;
