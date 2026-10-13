@@ -1516,6 +1516,61 @@ int hyperv_vsm_arm_handle_hvc_imm(CPUState *cs, struct kvm_run *run)
     }
     trace_hyperv_vsm_arm_hvc_imm(hyperv_vp_index(cs), cs->kvm_plane,
                                  (uint64_t)run->hypercall.nr, status, ret);
+    {
+        /* R4 diag (env R4_SC_TRACE=1): VP0 VTL0->VTL1 calls. Print the VTL0
+         * registers and dump 0x30 bytes behind each callee-saved candidate
+         * so the NT secure-call block (type=2, call#) can be located. */
+        static int r4_sc_trace = -1;
+        if (r4_sc_trace < 0) {
+            r4_sc_trace = getenv("R4_SC_TRACE") ? 1 : 0;
+        }
+        static uint64_t r4_last_blk;
+        if (r4_sc_trace && hyperv_vp_index(cs) == 0 &&
+            status == HV_STATUS_SUCCESS && run->hypercall.nr == 3 &&
+            cs->kvm_plane == 1 && r4_last_blk) {
+            CPUState *v0 = hv_plane_vcpu(0, 0);
+            uint8_t b[0x30];
+            int i;
+            if (v0 && !cpu_memory_rw_debug(v0, r4_last_blk, b, sizeof(b), false)) {
+                fprintf(stderr, "R4SC3 ret blk=0x%" PRIx64 ":", r4_last_blk);
+                for (i = 0; i < 0x30; i++) {
+                    fprintf(stderr, "%s%02x", (i % 8) ? "" : " ", b[i]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+        if (r4_sc_trace && hyperv_vp_index(cs) == 0 &&
+            status == HV_STATUS_SUCCESS && run->hypercall.nr == 2 &&
+            cs->kvm_plane == 0) {
+            CPUARMState *env = &ARM_CPU(cs)->env;
+            static const int regs[] = { 0, 1, 2, 3, 18, 19, 20, 21, 22, 29 };
+            int k;
+            cpu_synchronize_state(cs);
+            r4_last_blk = env->xregs[3];
+            fprintf(stderr, "R4SC2 sp=0x%" PRIx64 " pc=0x%" PRIx64,
+                    env->xregs[31], env->pc);
+            for (k = 0; k < (int)ARRAY_SIZE(regs); k++) {
+                fprintf(stderr, " x%d=0x%" PRIx64, regs[k], env->xregs[regs[k]]);
+            }
+            fprintf(stderr, "\n");
+            for (k = 0; k < (int)ARRAY_SIZE(regs); k++) {
+                uint64_t a = env->xregs[regs[k]];
+                uint8_t b[0x20];
+                int i;
+                if (a < 0xffff000000000000ULL || regs[k] == 18 || regs[k] == 29) {
+                    continue;
+                }
+                if (cpu_memory_rw_debug(cs, a, b, sizeof(b), false)) {
+                    continue;
+                }
+                fprintf(stderr, "R4SC2  [x%d]:", regs[k]);
+                for (i = 0; i < 0x20; i++) {
+                    fprintf(stderr, "%s%02x", (i % 8) ? "" : " ", b[i]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+    }
     /* a refused switch: the kernel injects an undefined instruction */
     run->hypercall.ret = status == HV_STATUS_SUCCESS ? 0 : 1;
 

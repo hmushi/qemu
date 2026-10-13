@@ -2717,9 +2717,9 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
     if (code != 0x0019) { /* 0x19 fires tens of thousands of times during
                             * boot-driver relocation; logging each throttles
                             * the boot. Count-only below. */
-    fprintf(stderr, "r1_hv_hcall: pc=0x%" PRIx64 " vtl=%d code=0x%04x fast=%d"
+    fprintf(stderr, "r1_hv_hcall: pc=0x%" PRIx64 " lr=0x%" PRIx64 " vtl=%d code=0x%04x fast=%d"
             " reps=%u varhdr=%u in=0x%" PRIx64 " out=0x%" PRIx64,
-            env->pc, active_vtl(cs), code, fast, reps, varhdr, in_gpa,
+            env->pc, env->xregs[30], active_vtl(cs), code, fast, reps, varhdr, in_gpa,
             out_gpa);
     if (fast && (code == 0x0050 || code == 0x0051)) {
         fprintf(stderr, " name=0x%x part=0x%" PRIx64 " vpvtl=0x%" PRIx64
@@ -2729,6 +2729,25 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
     fprintf(stderr, " -> status=0x%" PRIx64 " repsdone=%" PRIu64
             " lo=0x%" PRIx64 " hi=0x%" PRIx64 "%s\n", status, reps_completed,
             lo, hi, status != HV_STATUS_SUCCESS ? " REFUSED" : "");
+    if (status != HV_STATUS_SUCCESS && fast && (code == 0x0050 || code == 0x0051)) {
+        /* R1 diag: AArch64 frame-chain walk from the hypercall site so the
+         * refused register read can be attributed to its real NT caller. */
+        uint64_t fp = env->xregs[29];
+        int d;
+        fprintf(stderr, "r1_hv_refused_stack: lr=0x%" PRIx64, env->xregs[30]);
+        for (d = 0; d < 8 && fp; d++) {
+            uint64_t frame[2];
+            if (cpu_memory_rw_debug(cs, fp, (uint8_t *)frame, 16, false) != 0) {
+                break;
+            }
+            fprintf(stderr, " f%d=0x%" PRIx64, d, frame[1]);
+            if (frame[0] <= fp) {
+                break;
+            }
+            fp = frame[0];
+        }
+        fprintf(stderr, "\n");
+    }
     }
     if ((code == 0x50 || code == 0x51) &&
         ((name >= 0x200 && name <= 0x20f) || name == 0x90007)) {
