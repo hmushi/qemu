@@ -45,6 +45,7 @@
 #include "internals.h"
 #include "system/memory.h"
 #include <linux/kvm.h>  /* KVM_REG_ARM_TIMER_CNT */
+#include <unistd.h>  /* access() */
 #include "exec/memattrs.h"
 #include "hyperv-arm.h"
 #include "hyperv-vsm.h"
@@ -853,8 +854,9 @@ static uint16_t set_vp_register(uint32_t name, const struct hv_u128 *val,
             return HV_STATUS_SUCCESS;
         }
         if (kvm_get_one_reg(target_vcpu, KVM_REG_ARM_TIMER_CNT, &cnt) == 0) {
-            off = (int64_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 100) -
-                  (int64_t)(uint64_t)(((__uint128_t)cnt * scale) >> 64);
+            off = (access("/tmp/r4-reftsc-cntvct", 0) == 0) ? 0 :
+                  ((int64_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 100) -
+                  (int64_t)(uint64_t)(((__uint128_t)cnt * scale) >> 64));
         }
         memset(&page, 0, sizeof(page));
         page.sequence = 1;

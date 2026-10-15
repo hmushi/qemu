@@ -747,6 +747,28 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         }
     }
 
+    /*
+     * R4: give every vCPU (all VPs, both VSM planes) ONE shared, VM-wide
+     * virtual counter offset. Without this KVM sets a PER-vCPU vtimer offset
+     * at each KVM_ARM_VCPU_INIT (= phys counter at that moment), so CNTVCT is
+     * non-monotonic AND inconsistent across VPs -> AP QPC goes backward (0x1DB)
+     * and, at higher VP counts, inter-VP time skew trips KiCheckStall. Snapshot
+     * the host counter and set it as the VM counter offset so guest CNTVCT is
+     * ~0 at boot, monotonic, and identical on every VP. Must run before any
+     * vCPU, like the SMCCC filter above.
+     */
+    if (access("/tmp/r4-vm-counter-offset", 0) == 0) {
+        uint64_t hostcnt = 0;
+        struct kvm_arm_counter_offset off;
+        int cr;
+        asm volatile("isb; mrs %0, cntvct_el0" : "=r"(hostcnt));
+        off.counter_offset = hostcnt;
+        off.reserved = 0;
+        cr = kvm_vm_ioctl(s, KVM_ARM_SET_COUNTER_OFFSET, &off);
+        fprintf(stderr, "R4VMCNT set_counter_offset host_cntvct=0x%llx ret=%d\n",
+                (unsigned long long)hostcnt, cr);
+    }
+
     return 0;
 }
 
