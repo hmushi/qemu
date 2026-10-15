@@ -588,6 +588,10 @@ struct kvm_translation2 {
 #define KVM_TRANSLATE_FLAGS_SET_ACCESSED	(1 << 0)
 #define KVM_TRANSLATE_FLAGS_SET_DIRTY	(1 << 1)
 #define KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED	(1 << 2)
+#define KVM_TRANSLATE_FLAGS_ALL                     \
+	(KVM_TRANSLATE_FLAGS_SET_ACCESSED |         \
+	KVM_TRANSLATE_FLAGS_SET_DIRTY |             \
+	KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED)
 	__u16 flags;
 #define KVM_TRANSLATE_ACCESS_WRITE	(1 << 0)
 #define KVM_TRANSLATE_ACCESS_USER	(1 << 1)
@@ -601,13 +605,13 @@ struct kvm_translation2 {
 
 	/* out */
 	__u64 physical_address;
-	__u8  valid;
 #define KVM_TRANSLATE_FAULT_NOT_PRESENT	1
 #define KVM_TRANSLATE_FAULT_PRIVILEGE_VIOLATION	2
 #define KVM_TRANSLATE_FAULT_RESERVED_BITS	3
 #define KVM_TRANSLATE_FAULT_INVALID_GVA	4
 #define KVM_TRANSLATE_FAULT_INVALID_GPA	5
 	__u16 error_code;
+	__u8  valid;
 	__u8  set_bits_succeeded;
 	__u8  padding2[4];
 };
