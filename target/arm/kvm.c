@@ -1901,6 +1901,59 @@ static void r1_hv_hcall_log(CPUState *cs, struct kvm_run *run)
     out_gpa = fast ? 0 : x[2];
 
     {
+        /* R7DISMISS: the enlightened VTL0 guest configures its NVMe completion
+         * LPI via the GIC redistributor (INVLPIR) before connecting the ISR, so
+         * a completion arriving in that gap (esp. at IO-queue reaffinitization
+         * during SMP bring-up) hits a VP with no handler and bugchecks
+         * 0x12 TRAP_CAUSE_UNKNOWN from KiPlayInterrupt. The hypervisor has no
+         * signal for when the ISR is live, so it cannot route around the race.
+         * The completion itself is benign (the NVMe CQ entry is already in guest
+         * RAM and drains when the real ISR connects), so dismissing the
+         * unexpected interrupt is correct. KiPlayInterrupt (RVA 0x287370) reads
+         * a global at RVA 0xc08d8c and takes an EOI-safe dismiss branch (the
+         * path Windows itself uses) when it is zero. Zero it in the live VTL0
+         * ntoskrnl. We only act when env->pc is in the kernel (VTL0 ntoskrnl at
+         * a hypercall), so the current-VP translation is VTL0 and the base scan
+         * lands on ntoskrnl; a KiPlayInterrupt instruction-signature check
+         * rejects securekernel/driver images. Gated by /tmp/r7-dismiss. */
+        static uint64_t r7_base;
+        static bool r7_logged;
+        if (access("/tmp/r7-dismiss", 0) == 0 && (env->pc >> 40) == 0xfffff8) {
+            if (!r7_base) {
+                uint64_t a = env->pc & ~0xffffULL;
+                int k;
+                for (k = 0; k < 8192; k++) {
+                    uint8_t mz[2];
+                    if (cpu_memory_rw_debug(cs, a, mz, 2, false) == 0 &&
+                        mz[0] == 0x4d && mz[1] == 0x5a) {
+                        uint32_t s1 = 0, s2 = 0;
+                        cpu_memory_rw_debug(cs, a + 0x287414, (uint8_t *)&s1, 4, false);
+                        cpu_memory_rw_debug(cs, a + 0x287418, (uint8_t *)&s2, 4, false);
+                        if (s1 == 0xb94d8d08 && s2 == 0x34009f48) {
+                            r7_base = a;
+                            break;
+                        }
+                    }
+                    a -= 0x10000;
+                }
+            }
+            if (r7_base) {
+                uint32_t cur = 0, z = 0;
+                if (cpu_memory_rw_debug(cs, r7_base + 0xc08d8c,
+                                        (uint8_t *)&cur, 4, false) == 0 && cur != 0) {
+                    cpu_memory_rw_debug(cs, r7_base + 0xc08d8c,
+                                        (uint8_t *)&z, 4, true);
+                    if (!r7_logged) {
+                        fprintf(stderr, "R7DISMISS zeroed KiBugCheckUnexpectedInterrupts"
+                                " base=0x%" PRIx64 " was=0x%x\n", r7_base, cur);
+                        r7_logged = true;
+                    }
+                }
+            }
+        }
+    }
+
+    {
         /* R1ROOTNOW: on a reboot loop the anchor base is stale, so recompute
          * the ntoskrnl base from the current kernel pc and read HvlpRootFlags
          * one hcall after the 0x204 answer, by when HvlpDetermineEnlightenments
