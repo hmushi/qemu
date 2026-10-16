@@ -79,6 +79,8 @@ typedef struct AcpiFadtData {
     uint16_t arm_boot_arch;    /* ARM_BOOT_ARCH */
     uint16_t iapc_boot_arch;   /* IAPC_BOOT_ARCH */
     uint8_t minor_ver;         /* FADT Minor Version */
+    /* Hypervisor Vendor Identity, ACPI 6.0, rev 6 only. NULL keeps "QEMU". */
+    const char *hypervisor_id;
 
     /*
      * respective tables offsets within ACPI_BUILD_TABLE_FILE,
