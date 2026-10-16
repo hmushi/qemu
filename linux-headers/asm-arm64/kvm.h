@@ -417,6 +417,7 @@ enum {
 #define   KVM_DEV_ARM_VGIC_SAVE_PENDING_TABLES	3
 #define   KVM_DEV_ARM_ITS_CTRL_RESET		4
 #define   KVM_DEV_ARM_VGIC_USERSPACE_PPIS	5
+#define   KVM_DEV_ARM_VGIC_CTRL_SECURITY_EXTN	6
 
 /* Device Control API on vcpu fd */
 #define KVM_ARM_VCPU_PMU_V3_CTRL	0
@@ -447,6 +448,7 @@ enum {
 #define KVM_ARM_IRQ_TYPE_CPU		0
 #define KVM_ARM_IRQ_TYPE_SPI		1
 #define KVM_ARM_IRQ_TYPE_PPI		2
+#define KVM_ARM_IRQ_TYPE_SGI		3
 
 /* out-of-kernel GIC cpu interrupt injection irq_number field */
 #define KVM_ARM_IRQ_CPU_IRQ		0
@@ -509,6 +511,8 @@ struct kvm_smccc_filter {
 /* arm64-specific KVM_EXIT_HYPERCALL flags */
 #define KVM_HYPERCALL_EXIT_SMC		(1U << 0)
 #define KVM_HYPERCALL_EXIT_16BIT	(1U << 1)
+/* Set when nr is the HVC immediate (KVM_CAP_ARM_HVC_IMM_EXITS), not a function ID */
+#define KVM_HYPERCALL_EXIT_HVC_IMM	(1U << 2)
 
 /*
  * Get feature ID registers userspace writable mask.

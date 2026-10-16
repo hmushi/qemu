@@ -156,8 +156,16 @@ struct kvm_exit_snp_req_certs {
 
 struct kvm_plane_event_exit {
 #define KVM_PLANE_EVENT_CREATE_VCPU	1
+#define KVM_PLANE_EVENT_INTERRUPT	2
+#define KVM_PLANE_EVENT_LOWER_INTERRUPT	3
 	__u32 cause;
 	__u32 plane;
+	/*
+	 * KVM_PLANE_EVENT_INTERRUPT: higher planes of the vCPU with a pending
+	 * interrupt (arm64).  KVM_PLANE_EVENT_LOWER_INTERRUPT: lower planes
+	 * whose interrupt became pending since last reported (arm64).  Both
+	 * carry the plane mask in extra[0].
+	 */
 	__u64 extra[8];
 };
 
@@ -470,6 +478,15 @@ struct kvm_run {
 #define KVM_MEMORY_EXIT_FLAG_EXEC	(1ULL << 2)
 #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
 #define KVM_MEMORY_EXIT_FLAG_GVA_VALID	(1ULL << 4)
+/* The fault was caused by the vCPU's plane's memory protections. */
+#define KVM_MEMORY_EXIT_FLAG_PLANE_PROT	(1ULL << 5)
+/*
+ * insn_len/insn_bytes are valid.  For an EXEC fault the faulting
+ * instruction itself cannot be read: insn_bytes stays zero, and
+ * insn_len is the length of the instruction which performed the
+ * fetch (reported by VMX hardware; not available on SVM).
+ */
+#define KVM_MEMORY_EXIT_FLAG_INSN_VALID	(1ULL << 6)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
@@ -1054,14 +1071,26 @@ struct kvm_enable_cap {
 #define KVM_CAP_S390_USER_OPEREXEC 246
 #define KVM_CAP_S390_KEYOP 247
 #define KVM_CAP_S390_VSIE_ESAMODE 248
-#define KVM_CAP_S390_HPAGE_2G 249
 #define KVM_CAP_PLANES 249
 #define KVM_CAP_HYPERV_FORWARD_HCALL 250
+
+/*
+ * Userspace completion of a forwarded Hyper-V hypercall (KVM_EXIT_HYPERV_HCALL
+ * under KVM_CAP_HYPERV_FORWARD_HCALL): setting this bit in the result makes
+ * KVM raise #UD at the faulting instruction instead of completing the
+ * hypercall; all other result bits are then ignored.  Only honoured while
+ * forwarding is enabled, and only on kernels where
+ * KVM_CHECK_EXTENSION(KVM_CAP_HYPERV_FORWARD_HCALL) returns >= 2.
+ */
+#define KVM_HV_HCALL_RESULT_RAISE_UD	(1ULL << 63)
+#define KVM_CAP_HCALL_FAULT_EXIT 252
 #define KVM_CAP_HYPERV_VTL_SWITCH 253
 #define KVM_CAP_HYPERV_REG_INTERCEPT 254
 #define KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT 255
 #define KVM_CAP_TRANSLATE2 256
-#define KVM_HV_HCALL_RESULT_RAISE_UD	(1ULL << 63)
+#define KVM_CAP_PLANE_MEMORY_OVERLAYS 257
+#define KVM_CAP_ARM_HVC_IMM_EXITS 258
+#define KVM_CAP_ARM_IRQ_LINE_SGI 259
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
@@ -1428,6 +1457,7 @@ struct kvm_plane_memory_overlay {
 #define KVM_SET_PLANE_MEMORY_OVERLAY	  _IOW(KVMIO, 0xe7, struct kvm_plane_memory_overlay)
 #define   KVM_PLANE_RUN_STATE_STOPPED	0
 #define   KVM_PLANE_RUN_STATE_RUNNABLE	1
+#define   KVM_PLANE_RUN_STATE_KERNEL_STOPPED	2
 
 /*
  * ioctls for vcpu fds
