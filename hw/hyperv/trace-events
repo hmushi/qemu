@@ -44,3 +44,10 @@ hyperv_vsm_plane_selected(uint32_t vp_index, int plane, const char *why) "VP %u 
 hyperv_vsm_plane_vtl_event(uint32_t vp_index, int vtl, uint32_t cause, uint32_t plane, uint64_t extra) "VP %u running VTL%d: plane event cause %u plane %u extra 0x%" PRIx64
 hyperv_vsm_plane_run_vtl(uint32_t vp_index, int from_vtl, int to_vtl, int reason) "VP %u VTL%d -> VTL%d reason %d"
 
+# vsm-core.c
+hyperv_vsm_hcall_enable_partition_vtl(uint64_t partition_id, uint8_t target_vtl, uint8_t flags) "partition 0x%" PRIx64 " target VTL%u flags 0x%x"
+hyperv_vsm_hcall_enable_vp_vtl(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl) "partition 0x%" PRIx64 " VP %u target VTL%u"
+hyperv_vsm_hcall_vtl_call(uint32_t vp_index, int vtl) "VP %u from VTL%d"
+hyperv_vsm_hcall_vtl_return(uint32_t vp_index, int vtl) "VP %u from VTL%d"
+hyperv_vsm_enable_vp_vtl_reject(const char *why, uint32_t vp_index, uint8_t vtl) "rejected: %s (VP %u VTL%u)"
+hyperv_vsm_vina_config(uint32_t vp_index, int vtl, uint64_t val) "VP %u VTL%d VINA 0x%" PRIx64
