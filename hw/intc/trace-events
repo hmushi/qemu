@@ -357,3 +357,11 @@ loongarch_extioi_writew(uint64_t addr, uint64_t val) "addr: 0x%"PRIx64 "val: 0x%
 # riscv_aplic.c
 riscv_aplic_read(uint64_t offset, unsigned size, uint64_t value) "offset: 0x%" PRIx64 ", size: %u, value: 0x%" PRIx64
 riscv_aplic_write(uint64_t offset, unsigned size, uint64_t value) "offset: 0x%" PRIx64 ", size: %u, value: 0x%" PRIx64
+
+# arm_gicv3_its_kvm.c
+its_kvm_program(uint64_t base, int status) "tables at 0x%" PRIx64 " status %d"
+its_kvm_lpi_tables(uint64_t prop, uint64_t pend, int cpus) "LPI config table at 0x%" PRIx64 " pending tables at 0x%" PRIx64 " for %d vCPUs"
+its_kvm_cmd(uint32_t off, uint64_t dw0, uint64_t dw1, uint64_t dw2) "queue 0x%x: 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64
+its_kvm_map(uint32_t devid, uint32_t event, uint32_t lpi, int target, int status) "devid 0x%x event %u lpi %u vcpu %d status %d"
+its_kvm_unmap(uint32_t devid, uint32_t event, int status) "devid 0x%x event %u status %d"
+its_kvm_retarget(uint32_t devid, uint32_t event, int target, int status) "devid 0x%x event %u vcpu %d status %d"
