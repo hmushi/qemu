@@ -68,6 +68,7 @@
 #include "hw/intc/arm_gic.h"
 #include "hw/intc/arm_gicv3_common.h"
 #include "hw/intc/arm_gicv3_its_common.h"
+#include "hw/intc/arm_gicv3_its_kvm.h"
 #include "hw/intc/arm_gicv5_common.h"
 #include "hw/core/irq.h"
 #include "kvm_arm.h"
@@ -211,6 +212,8 @@ static const MemMapEntry base_memmap[] = {
     [VIRT_PVTIME] =             { 0x090a0000, 0x00010000 },
     [VIRT_SECURE_GPIO] =        { 0x090b0000, 0x00001000 },
     [VIRT_ACPI_PCIHP] =         { 0x090c0000, ACPI_PCIHP_SIZE },
+    /* QEMU-owned ITS tables, see hw/intc/arm_gicv3_its_kvm.h; not advertised */
+    [VIRT_ITS_KVM_TABLES] =     { 0x09100000, 0x00800000 },
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
@@ -1124,8 +1127,20 @@ static void create_its(VirtMachineState *vms)
 
     object_property_set_link(OBJECT(dev), "parent-gicv3", OBJECT(vms->gic),
                              &error_abort);
+    if (vms->its_kvm_program) {
+        if (!kvm_irqchip_in_kernel()) {
+            error_report("its-kvm-program needs the KVM in-kernel ITS");
+            exit(1);
+        }
+        assert(vms->memmap[VIRT_ITS_KVM_TABLES].size >= ITS_KVM_TABLES_SIZE);
+        qdev_prop_set_bit(dev, "kvm-program", true);
+    }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, vms->memmap[VIRT_GIC_ITS].base);
+    if (vms->its_kvm_program) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1,
+                        vms->memmap[VIRT_ITS_KVM_TABLES].base);
+    }
 
     fdt_add_its_gic_node(vms);
     vms->msi_controller = VIRT_MSI_CTRL_ITS;
@@ -3607,6 +3622,20 @@ static void virt_set_gic_security_extn(Object *obj, bool value, Error **errp)
     vms->gic_security_extn = value;
 }
 
+static bool virt_get_its_kvm_program(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->its_kvm_program;
+}
+
+static void virt_set_its_kvm_program(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->its_kvm_program = value;
+}
+
 static bool virt_get_ras(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -4324,6 +4353,15 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "states, for guests that require "
                                           "it such as Windows under a "
                                           "Hyper-V identity");
+
+    object_class_property_add_bool(oc, "its-kvm-program",
+                                   virt_get_its_kvm_program,
+                                   virt_set_its_kvm_program);
+    object_class_property_set_description(oc, "its-kvm-program",
+                                          "Set on to let QEMU program the "
+                                          "KVM ITS for a guest that does not "
+                                          "drive it, such as Windows under "
+                                          "a Hyper-V identity");
 
     object_class_property_add_bool(oc, "ras", virt_get_ras,
                                    virt_set_ras);

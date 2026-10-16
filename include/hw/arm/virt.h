@@ -100,6 +100,7 @@ enum {
     VIRT_GWDT_WS0,
     VIRT_GWDT_REFRESH,
     VIRT_GWDT_CONTROL,
+    VIRT_ITS_KVM_TABLES,
     VIRT_LOWMEMMAP_LAST,
 };
 
@@ -176,6 +177,7 @@ struct VirtMachineState {
     bool virt;
     bool ras;
     bool gic_security_extn;
+    bool its_kvm_program;
     bool mte;
     bool dtb_randomness;
     bool second_ns_uart_present;
