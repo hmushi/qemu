@@ -49,5 +49,8 @@ hyperv_vsm_hcall_enable_partition_vtl(uint64_t partition_id, uint8_t target_vtl,
 hyperv_vsm_hcall_enable_vp_vtl(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl) "partition 0x%" PRIx64 " VP %u target VTL%u"
 hyperv_vsm_hcall_vtl_call(uint32_t vp_index, int vtl) "VP %u from VTL%d"
 hyperv_vsm_hcall_vtl_return(uint32_t vp_index, int vtl) "VP %u from VTL%d"
+hyperv_vsm_hcall_get_set_vp_registers(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl, int active_vtl, uint16_t count, bool set, uint32_t caller_vp) "partition 0x%" PRIx64 " VP %u target VTL%u from VTL%d count %u set %d caller VP %u"
 hyperv_vsm_enable_vp_vtl_reject(const char *why, uint32_t vp_index, uint8_t vtl) "rejected: %s (VP %u VTL%u)"
 hyperv_vsm_vina_config(uint32_t vp_index, int vtl, uint64_t val) "VP %u VTL%d VINA 0x%" PRIx64
+hyperv_vsm_vp_register_hcall_reject(const char *why, uint16_t rep_cnt, uint16_t rep_idx, bool fast, bool set, uint32_t caller_vp, int caller_vtl, uint64_t status) "rejected: %s rep_cnt %u rep_idx %u fast %d set %d caller VP %u VTL%d status 0x%" PRIx64
+hyperv_vsm_translate_gva(uint32_t caller_vp, int caller_vtl, uint32_t vp_index, uint8_t target_vtl, uint64_t control_flags, uint64_t gva_page, uint64_t gpa_page, bool overlay, uint32_t result) "caller VP %u VTL%d target VP %u VTL%u flags 0x%" PRIx64 " gva page 0x%" PRIx64 " gpa page 0x%" PRIx64 " overlay %d result %u"

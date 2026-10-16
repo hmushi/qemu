@@ -493,3 +493,303 @@ void set_vsm_partition_config(uint8_t vtl, uint64_t data)
 
     *cur = new_val;
 }
+
+/* registers handled per call; bounds the stack use, not a TLFS limit */
+#define VP_REGISTER_LIST_SIZE 16u
+
+/* a rejected call applies no register; the trace is its only record */
+static uint64_t reject_vp_register_hcall(CPUState *cs, const char *why,
+                                         uint16_t rep_cnt, uint16_t rep_idx,
+                                         bool fast, bool set, uint64_t status)
+{
+    trace_hyperv_vsm_vp_register_hcall_reject(why, rep_cnt, rep_idx, fast, set,
+                                              hyperv_vp_index(cs),
+                                              active_vtl(cs), status);
+    return status;
+}
+
+uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
+                                          struct kvm_hyperv_exit *exit,
+                                          bool set)
+{
+    uint64_t in = exit->u.hcall.input;
+    uint16_t rep_cnt = (in >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+    uint16_t rep_idx = (in >> HV_HYPERCALL_REP_START_OFFSET) & 0xfff;
+    bool fast = exit->u.hcall.input & HV_HYPERCALL_FAST;
+    MachineState *ms = MACHINE(qdev_get_machine());
+    struct hv_u128 vals[VP_REGISTER_LIST_SIZE];
+    uint32_t names[VP_REGISTER_LIST_SIZE];
+    struct hv_input_get_vp_registers input;
+    uint16_t xmm_index = 0;
+    CPUState *target_vcpu;
+    bool dirty = false;
+    uint16_t status = HV_STATUS_SUCCESS;
+    uint16_t nregs;
+    uint8_t vtl;
+    int i;
+
+    if (rep_idx >= rep_cnt) {
+        return reject_vp_register_hcall(cs, "rep_idx past rep_cnt",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_HYPERCALL_INPUT);
+    }
+    nregs = MIN(rep_cnt - rep_idx, VP_REGISTER_LIST_SIZE);
+
+    if (fast) {
+        /* names (and values) travel in XMM registers */
+        if (!hv_exit_has_xmm(exit)) {
+            return reject_vp_register_hcall(cs, "fast call without XMM",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
+        }
+        input.partition_id = exit->u.hcall.params[0];
+        input.vp_index = exit->u.hcall.params[1] & 0xffffffff;
+        input.input_vtl.as_uint8 = (exit->u.hcall.params[1] >> 32) & 0xff;
+
+        /* everything is returned at once, so no continuation */
+        if (rep_idx != 0) {
+            return reject_vp_register_hcall(cs, "fast call with rep_idx",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
+        }
+
+        /* 6 XMM registers hold at most 4 names plus 4 values */
+        if (nregs > 4) {
+            return reject_vp_register_hcall(cs, "fast call over 4 registers",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
+        }
+
+        for (i = 0; i < nregs; i += 4, xmm_index += 2) {
+            names[i] = hv_exit_xmm_get(exit, xmm_index);
+            names[i + 1] = hv_exit_xmm_get(exit, xmm_index) >> 32;
+            names[i + 2] = hv_exit_xmm_get(exit, xmm_index + 1);
+            names[i + 3] = hv_exit_xmm_get(exit, xmm_index + 1) >> 32;
+        }
+
+        if (set) {
+            for (i = 0; i < nregs; i++, xmm_index += 2) {
+                vals[i].low_part = hv_exit_xmm_get(exit, xmm_index);
+                vals[i].high_part = hv_exit_xmm_get(exit, xmm_index + 1);
+            }
+        }
+    } else {
+        uint64_t ingpa = exit->u.hcall.params[0];
+
+        if (vsm_physmem_read(cs, ingpa, &input, sizeof(input)) != MEMTX_OK) {
+            return reject_vp_register_hcall(cs, "input header unreadable",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
+        }
+
+        if (set) {
+            /* a set carries the name and the value of each register together */
+            hv_register_assoc elements[VP_REGISTER_LIST_SIZE];
+
+            ingpa += sizeof(input) + rep_idx * sizeof(*elements);
+            if (vsm_physmem_read(cs, ingpa, elements,
+                                 nregs * sizeof(*elements)) != MEMTX_OK) {
+                return reject_vp_register_hcall(
+                    cs, "element list unreadable", rep_cnt, rep_idx, fast, set,
+                    HV_STATUS_INVALID_HYPERCALL_INPUT);
+            }
+
+            for (i = 0; i < nregs; i++) {
+                names[i] = elements[i].name;
+                vals[i] = elements[i].value.reg128;
+            }
+        } else {
+            ingpa += sizeof(input) + rep_idx * sizeof(*names);
+            if (vsm_physmem_read(cs, ingpa, names,
+                                 nregs * sizeof(*names)) != MEMTX_OK) {
+                return reject_vp_register_hcall(cs, "name list unreadable",
+                                                rep_cnt, rep_idx, fast, set,
+                                                HV_STATUS_INVALID_HYPERCALL_INPUT);
+            }
+        }
+    }
+
+    if (input.partition_id != HV_PARTITION_ID_SELF) {
+        return reject_vp_register_hcall(cs, "partition not self",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_PARTITION_ID);
+    }
+
+    if (input_vtl_targets(input.input_vtl)) {
+        vtl = input.input_vtl.target_vtl;
+        if (vtl >= HV_NUM_VTLS) {
+            return reject_vp_register_hcall(cs, "target VTL out of range",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_INVALID_HYPERCALL_INPUT);
+        }
+        if (vtl > active_vtl(cs)) {
+            return reject_vp_register_hcall(cs, "target VTL above caller",
+                                            rep_cnt, rep_idx, fast, set,
+                                            HV_STATUS_ACCESS_DENIED);
+        }
+    } else {
+        vtl = active_vtl(cs);
+    }
+
+    if (input.vp_index == HV_VP_INDEX_SELF) {
+        input.vp_index = hyperv_vp_index(cs);
+    } else if (input.vp_index >= ms->smp.max_cpus) {
+        return reject_vp_register_hcall(cs, "VP index out of range",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_VP_INDEX);
+    }
+
+    target_vcpu = hv_plane_vcpu(input.vp_index, vtl);
+    if (!target_vcpu) {
+        return reject_vp_register_hcall(cs, "no vCPU for VP and VTL",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_VP_INDEX);
+    }
+
+    trace_hyperv_vsm_hcall_get_set_vp_registers(input.partition_id,
+                                                input.vp_index, vtl,
+                                                active_vtl(cs), nregs, set,
+                                                hyperv_vp_index(cs));
+
+    bql_lock();
+    if (vp_start_pending(input.vp_index)) {
+        bql_unlock();
+        return reject_vp_register_hcall(cs, "start in flight on the VP",
+                                        rep_cnt, rep_idx, fast, set,
+                                        HV_STATUS_INVALID_VP_STATE);
+    }
+    cpu_synchronize_state(target_vcpu);
+    for (i = 0; i < nregs; i++) {
+        status = set ?
+                 hv_vsm_arch_ops.set_vp_register(names[i], &vals[i],
+                                                 target_vcpu, &dirty) :
+                 hv_vsm_arch_ops.get_vp_register(names[i], &vals[i],
+                                                 target_vcpu);
+        if (status != HV_STATUS_SUCCESS) {
+            break;
+        }
+    }
+    if (dirty) {
+        cpu_synchronize_post_reset(target_vcpu);
+    }
+    bql_unlock();
+
+    /*
+     * Repeats before a failure stay applied. Report how many (@i) with the
+     * status, so the guest can resume (TLFS 3.9).
+     */
+    if (!set && i > 0) {
+        if (fast) {
+            int j;
+
+            for (j = 0; j < i; j++, xmm_index += 2) {
+                hv_exit_xmm_set(exit, xmm_index, vals[j].low_part);
+                hv_exit_xmm_set(exit, xmm_index + 1, vals[j].high_part);
+            }
+        } else {
+            uint64_t outgpa = exit->u.hcall.params[1] + rep_idx * sizeof(*vals);
+
+            vsm_physmem_write(cs, outgpa, vals, sizeof(*vals) * i);
+        }
+    }
+
+    return (uint64_t)status |
+           ((uint64_t)i << HV_HYPERCALL_REP_COMP_OFFSET);
+}
+
+uint32_t translate_result_code(const struct kvm_translation2 *tr,
+                                      uint64_t control_flags)
+{
+    switch (tr->error_code) {
+    case KVM_TRANSLATE_FAULT_NOT_PRESENT:
+    case KVM_TRANSLATE_FAULT_INVALID_GVA:
+        return HV_TRANSLATE_GVA_PAGE_NOT_PRESENT;
+    case KVM_TRANSLATE_FAULT_PRIVILEGE_VIOLATION:
+        return HV_TRANSLATE_GVA_PRIVILEGE_VIOLATION;
+    case KVM_TRANSLATE_FAULT_RESERVED_BITS:
+        return HV_TRANSLATE_GVA_INVALIDE_PAGE_TABLE_FLAGS;
+    case KVM_TRANSLATE_FAULT_INVALID_GPA:
+        return HV_TRANSLATE_GVA_GPA_UNMAPPED;
+    default:
+        if (!tr->set_bits_succeeded &&
+            (control_flags & HV_TRANSLATE_GVA_SET_PAGE_TABLE_BITS)) {
+            return HV_TRANSLATE_GVA_GPA_NO_WRITE_ACCESS;
+        }
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: KVM_TRANSLATE2 error code %u "
+                      "not mapped\n", tr->error_code);
+        return HV_TRANSLATE_GVA_PRIVILEGE_VIOLATION;
+    }
+}
+
+uint16_t hyperv_vsm_translate_gva(
+        CPUState *cs,
+        const struct hv_input_translate_virtual_address *in,
+        struct hv_output_translate_virtual_address *out)
+{
+    uint64_t flags = in->control_flags & HV_TRANSLATE_GVA_FLAGS_MASK;
+    uint32_t vp_index = in->vp_index;
+    CPUState *target_vcpu;
+    union hv_input_vtl in_vtl;
+    uint64_t gpa_page = 0;
+    uint8_t target_vtl;
+    bool overlay = false;
+    uint32_t result;
+
+    if (!hv_vsm_arch_ops.translate_gva) {
+        return HV_STATUS_INVALID_HYPERCALL_CODE;
+    }
+    if (in->partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    /*
+     * The target VTL rides in the top byte of the control word and the
+     * flags in its low six bits, so neither can reach the other.
+     */
+    in_vtl.as_uint8 = in->control_flags >> HV_TRANSLATE_GVA_INPUT_VTL_SHIFT;
+    if (input_vtl_targets(in_vtl)) {
+        target_vtl = in_vtl.target_vtl;
+        /* a VTL may translate for itself and below, never above */
+        if (target_vtl > active_vtl(cs)) {
+            return HV_STATUS_INVALID_VP_STATE;
+        }
+    } else {
+        target_vtl = active_vtl(cs);
+    }
+
+    if (vp_index == HV_ANY_VP) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+    if (vp_index == HV_VP_INDEX_SELF) {
+        vp_index = hyperv_vp_index(cs);
+    }
+    target_vcpu = hv_plane_vcpu(vp_index, target_vtl);
+    if (!target_vcpu) {
+        return HV_STATUS_INVALID_VP_INDEX;
+    }
+    /* a VP whose start packet has not been applied has no tables to walk */
+    if (vp_start_pending(vp_index)) {
+        return HV_STATUS_INVALID_VP_STATE;
+    }
+
+    result = hv_vsm_arch_ops.translate_gva(target_vcpu, in->gva_page, flags,
+                                           &gpa_page, &overlay);
+
+    memset(out, 0, sizeof(*out));
+    out->translation_result.result_code = result;
+    if (result == HV_TRANSLATE_GVA_SUCCESS) {
+        out->gpa_page = gpa_page;
+        out->translation_result.cache_type = HV_CACHE_TYPE_WRITE_BACK;
+        out->translation_result.overlay_page = overlay;
+        if (flags & HV_TRANSLATE_GVA_TLB_FLUSH_INHIBIT) {
+            set_tlb_flush_inhibit(sibling(cs, 0), true);
+        }
+    }
+
+    trace_hyperv_vsm_translate_gva(hyperv_vp_index(cs), active_vtl(cs),
+                                   vp_index, target_vtl, in->control_flags,
+                                   in->gva_page, out->gpa_page,
+                                   out->translation_result.overlay_page,
+                                   result);
+    return HV_STATUS_SUCCESS;
+}

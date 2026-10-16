@@ -122,6 +122,20 @@ bool get_vp_secure_vtl_config(CPUState *cs, uint32_t reg, struct hv_u128 *val);
 bool set_vp_secure_vtl_config(CPUState *cs, uint32_t reg, uint64_t data);
 /* HvRegisterVsmPartitionConfig of @vtl: the write-once fields are kept */
 void set_vsm_partition_config(uint8_t vtl, uint64_t data);
+uint32_t translate_result_code(const struct kvm_translation2 *tr,
+                               uint64_t control_flags);
+struct hv_input_translate_virtual_address;
+struct hv_output_translate_virtual_address;
+/*
+ * HvCallTranslateVirtualAddress (TLFS 10.8.3) on @in, already marshalled
+ * from the caller. @out is written only on HV_STATUS_SUCCESS; a failed
+ * translation is a success with a failure result_code. Other statuses mean
+ * a malformed or unroutable call.
+ */
+uint16_t hyperv_vsm_translate_gva(
+        CPUState *cs,
+        const struct hv_input_translate_virtual_address *in,
+        struct hv_output_translate_virtual_address *out);
 
 /* hypercall handlers, called from kvm_hv_handle_exit() */
 uint16_t hyperv_hcall_vtl_enable_partition_vtl(CPUState *cs, uint64_t param1,
@@ -134,13 +148,16 @@ uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param,
  */
 int hyperv_hcall_vtl_call(CPUState *cs, uint64_t *status);
 int hyperv_hcall_vtl_return(CPUState *cs, uint64_t *status);
+uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
+                                          struct kvm_hyperv_exit *exit,
+                                          bool set);
 
 /* @cs's VTL has VINA (TLFS 15.2.3) enabled and not yet asserted */
 bool hyperv_vsm_vina_armed(CPUState *cs);
 
 /*
- * Target hooks: the VP assist page and the register file behind
- * the VP start context.
+ * Target hooks: the VP assist page, the register file behind
+ * Get/SetVpRegisters and the VP start context.
  */
 typedef struct HvVsmArchOps {
     /* GPA of the VP assist page's vtl_control; the page is enabled */
@@ -149,6 +166,20 @@ typedef struct HvVsmArchOps {
     /* load an HV_INITIAL_VP_CONTEXT (TLFS 15.5.2) into @cs, BQL held */
     void (*load_vp_context)(CPUState *cs, const struct hv_init_vp_context *c,
                             bool enable_spiv, hwaddr input_gpa);
+    /* a register the core does not know; @target_vcpu's state is in sync */
+    uint16_t (*get_vp_register)(uint32_t name, struct hv_u128 *val,
+                                CPUState *target_vcpu);
+    uint16_t (*set_vp_register)(uint32_t name, const struct hv_u128 *val,
+                                CPUState *target_vcpu, bool *dirty);
+    /*
+     * Walk @target_vcpu's tables for @gva_page under @flags. Returns an
+     * enum hv_translate_gva_result_code; on success *@gpa_page is the frame
+     * and *@overlay says whether it is a hypervisor overlay page. Optional:
+     * x86 leaves it NULL and serves the hypercall with KVM_TRANSLATE2.
+     */
+    uint32_t (*translate_gva)(CPUState *target_vcpu, uint64_t gva_page,
+                              uint64_t flags, uint64_t *gpa_page,
+                              bool *overlay);
 } HvVsmArchOps;
 
 extern const HvVsmArchOps hv_vsm_arch_ops;
