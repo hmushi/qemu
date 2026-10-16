@@ -179,6 +179,7 @@ struct VirtMachineState {
     uint32_t ipa_size;
     bool gic_security_extn;
     bool its_kvm_program;
+    bool hv_identity;
     bool mte;
     bool dtb_randomness;
     bool second_ns_uart_present;
@@ -260,5 +261,8 @@ static inline int virt_gicv3_redist_region_count(VirtMachineState *vms)
     return (MACHINE(vms)->smp.cpus > redist0_capacity &&
             vms->highmem_redists) ? 2 : 1;
 }
+
+/* hv-identity: does the FADT name Hyper-V, so the guest makes its hypercalls */
+bool virt_hv_identity(void);
 
 #endif /* QEMU_ARM_VIRT_H */

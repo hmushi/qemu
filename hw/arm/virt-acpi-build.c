@@ -1126,6 +1126,7 @@ static void build_fadt_rev6(GArray *table_data, BIOSLinker *linker,
 {
     /* ACPI v6.3 */
     AcpiFadtData fadt = {
+        .hypervisor_id = vms->hv_identity ? "MsHyperV" : NULL,
         .rev = 6,
         .minor_ver = 3,
         .flags = 1 << ACPI_FADT_F_HW_REDUCED_ACPI,

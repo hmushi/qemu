@@ -1574,6 +1574,14 @@ static void create_uart(const VirtMachineState *vms, int uart,
     g_free(nodename);
 }
 
+bool virt_hv_identity(void)
+{
+    Object *ms = qdev_get_machine();
+
+    return object_dynamic_cast(ms, TYPE_VIRT_MACHINE) &&
+           VIRT_MACHINE(ms)->hv_identity;
+}
+
 static void create_rtc(const VirtMachineState *vms)
 {
     char *nodename;
@@ -3622,6 +3630,20 @@ static void virt_set_gic_security_extn(Object *obj, bool value, Error **errp)
     vms->gic_security_extn = value;
 }
 
+static bool virt_get_hv_identity(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->hv_identity;
+}
+
+static void virt_set_hv_identity(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->hv_identity = value;
+}
+
 static bool virt_get_its_kvm_program(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -4389,6 +4411,14 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "it such as Windows under a "
                                           "Hyper-V identity");
 
+    object_class_property_add_bool(oc, "hv-identity",
+                                   virt_get_hv_identity,
+                                   virt_set_hv_identity);
+    object_class_property_set_description(oc, "hv-identity",
+                                          "Set off to leave the Hyper-V "
+                                          "vendor identity out of the FADT "
+                                          "(default on)");
+
     object_class_property_add_bool(oc, "its-kvm-program",
                                    virt_get_its_kvm_program,
                                    virt_set_its_kvm_program);
@@ -4498,6 +4528,9 @@ static void virt_instance_init(Object *obj)
 
     /* Default disallows RAS instantiation */
     vms->ras = false;
+
+    /* the Hyper-V vendor identity in the FADT, see build_fadt_rev6() */
+    vms->hv_identity = true;
 
     /* MTE is disabled by default.  */
     vms->mte = false;
