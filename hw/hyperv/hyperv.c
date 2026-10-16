@@ -292,6 +292,8 @@ struct HvSintRoute {
     EventNotifier sint_ack_notifier;
 
     HvSintStagedMessage *staged_msg;
+    /* completion BH owned by the route, so unref can cancel it */
+    QEMUBH *msg_bh;
 
     unsigned refcount;
     QLIST_ENTRY(HvSintRoute) link;
@@ -345,12 +347,10 @@ static void cpu_post_msg(CPUState *cs, run_on_cpu_data data)
 
     dst_msg = &synic->msg_page->slot[sint_route->sint];
 
-    if (dst_msg->header.message_type != HV_MESSAGE_NONE) {
-        dst_msg->header.message_flags |= HV_MESSAGE_FLAG_PENDING;
-        staged_msg->status = -EAGAIN;
+    staged_msg->status = hv_msg_slot_post(dst_msg, &staged_msg->msg);
+    if (staged_msg->status == -EAGAIN) {
         wait_for_sint_ack = true;
     } else {
-        memcpy(dst_msg, &staged_msg->msg, sizeof(*dst_msg));
         staged_msg->status = hyperv_sint_route_set_sint(sint_route);
     }
 
@@ -364,8 +364,7 @@ posted:
      * trigger the notification from KVM via sint_ack_notifier
      */
     if (!wait_for_sint_ack) {
-        aio_bh_schedule_oneshot(qemu_get_aio_context(), sint_msg_bh,
-                                sint_route);
+        qemu_bh_schedule(sint_route->msg_bh);
     }
 }
 
@@ -406,7 +405,7 @@ static void sint_ack_handler(EventNotifier *notifier)
      * the guest consumed the previous message so complete the current one with
      * -EAGAIN and let the msg originator retry
      */
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), sint_msg_bh, sint_route);
+    qemu_bh_schedule(sint_route->msg_bh);
 }
 
 /*
@@ -565,6 +564,7 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint
         }
         sint_route->staged_msg->cb = cb;
         sint_route->staged_msg->cb_data = cb_data;
+        sint_route->msg_bh = qemu_bh_new(sint_msg_bh, sint_route);
 
         r = event_notifier_init(ack_notifier, false);
         if (r < 0) {
@@ -590,6 +590,7 @@ cleanup_err_sint:
             event_notifier_cleanup(ack_notifier);
         }
 
+        qemu_bh_delete(sint_route->msg_bh);
         g_free(sint_route->staged_msg);
     }
 
@@ -600,6 +601,25 @@ cleanup_err_sint:
 void hyperv_sint_route_ref(HvSintRoute *sint_route)
 {
     sint_route->refcount++;
+}
+
+void hyperv_sint_route_cancel(HvSintRoute *sint_route)
+{
+    HvSintStagedMessage *staged_msg;
+
+    if (!sint_route) {
+        return;
+    }
+    staged_msg = sint_route->staged_msg;
+    if (!staged_msg ||
+        qatomic_cmpxchg(&staged_msg->state, HV_STAGED_MSG_POSTED,
+                        HV_STAGED_MSG_FREE) != HV_STAGED_MSG_POSTED) {
+        return;
+    }
+    staged_msg->status = 0;
+    event_notifier_set_handler(&sint_route->sint_ack_notifier, NULL);
+    /* drop the reference hyperv_post_msg took for the completion */
+    hyperv_sint_route_unref(sint_route);
 }
 
 void hyperv_sint_route_unref(HvSintRoute *sint_route)
@@ -635,6 +655,7 @@ void hyperv_sint_route_unref(HvSintRoute *sint_route)
     if (sint_route->staged_msg) {
         event_notifier_set_handler(&sint_route->sint_ack_notifier, NULL);
         event_notifier_cleanup(&sint_route->sint_ack_notifier);
+        qemu_bh_delete(sint_route->msg_bh);
         g_free(sint_route->staged_msg);
     }
     g_free(sint_route);
@@ -656,6 +677,42 @@ int hyperv_sint_route_set_sint(HvSintRoute *sint_route)
     }
 
     return event_notifier_set(&sint_route->sint_set_notifier);
+}
+
+/*
+ * HvRegisterEom from a VTL whose SynIC QEMU models. Drop each SINT line
+ * whose slot is now empty, and complete a message waiting for this
+ * acknowledgement, as the kernel's resample notifier does.
+ */
+void hyperv_synic_eom(CPUState *cs)
+{
+    SynICState *synic = get_synic(cs);
+    HvSintRoute *sint_route;
+
+    if (!synic) {
+        return;
+    }
+    qemu_mutex_lock(&synic->sint_routes_mutex);
+    QLIST_FOREACH(sint_route, &synic->sint_routes, link) {
+        struct hyperv_message *slot;
+
+        if (!sint_route->gsi_valid || !sint_route->arch_irq) {
+            continue;
+        }
+        slot = synic->msg_page_addr ?
+               &synic->msg_page->slot[sint_route->sint] : NULL;
+        if (slot && slot->header.message_type != HV_MESSAGE_NONE) {
+            /* still unread: keep the line up, the guest will come back */
+            continue;
+        }
+        hv_plane_arch_sint_set(cs, sint_route->sint, false);
+        if (sint_route->staged_msg &&
+            qatomic_read(&sint_route->staged_msg->state) ==
+            HV_STAGED_MSG_POSTED && sint_route->staged_msg->status == -EAGAIN) {
+            qemu_bh_schedule(sint_route->msg_bh);
+        }
+    }
+    qemu_mutex_unlock(&synic->sint_routes_mutex);
 }
 
 typedef struct MsgHandler {

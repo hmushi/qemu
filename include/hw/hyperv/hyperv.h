@@ -27,8 +27,12 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint
                                    HvSintMsgCb cb, void *cb_data);
 void hyperv_sint_route_ref(HvSintRoute *sint_route);
 void hyperv_sint_route_unref(HvSintRoute *sint_route);
+/* stop waiting for the guest to acknowledge a posted message */
+void hyperv_sint_route_cancel(HvSintRoute *sint_route);
 
 int hyperv_sint_route_set_sint(HvSintRoute *sint_route);
+/* HvRegisterEom on a SynIC QEMU models (arm64): drop the taken SINT lines */
+void hyperv_synic_eom(CPUState *cs);
 /* whether the route can raise its SINT (a GSI or a target SINT line) */
 bool hyperv_sint_route_armed(HvSintRoute *sint_route);
 
