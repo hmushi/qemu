@@ -2,10 +2,21 @@ config HYPERV
     bool
     depends on KVM
 
+# the plane layer of hw/hyperv/vsm-planes.c and the VSM core, for targets
+# that implement hv_plane_arch_*() and hv_vsm_arch_ops (arm64)
+config HYPERV_VSM_PLANES
+    bool
+    depends on HYPERV
+
+config HYPERV_VSM_PLANES_STUB
+    bool
+    default y
+    depends on HYPERV && !HYPERV_VSM_PLANES
+
 config HYPERV_TESTDEV
     bool
     default y if TEST_DEVICES
-    depends on HYPERV
+    depends on HYPERV && ISA_BUS
 
 config VMBUS
     bool

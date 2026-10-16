@@ -1,4 +1,6 @@
 system_ss.add(when: 'CONFIG_HYPERV', if_true: files('hyperv.c'))
+specific_ss.add(when: 'CONFIG_HYPERV_VSM_PLANES', if_true: files('vsm-planes.c'))
+system_ss.add(when: 'CONFIG_HYPERV_VSM_PLANES_STUB', if_true: files('vsm-planes-stub.c'))
 system_ss.add(when: 'CONFIG_HYPERV_TESTDEV', if_true: files('hyperv_testdev.c'))
 system_ss.add(when: 'CONFIG_VMBUS', if_true: files('vmbus.c'))
 system_ss.add(when: 'CONFIG_SYNDBG', if_true: files('syndbg.c'))
