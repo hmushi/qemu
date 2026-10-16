@@ -1669,7 +1669,9 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
     uint32_t name;
     uint64_t lo = 0, hi = 0, status = HV_STATUS_INVALID_HYPERCALL_CODE;
     uint64_t reps_completed = 1;
+    uint64_t in_gpa, out_gpa;
     uint16_t reps;
+    bool fast;
     int i;
 
     cpu_synchronize_state(cs);
@@ -1683,7 +1685,10 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
      * rep count. In the memory form x1 and x2 are the input and output
      * block addresses.
      */
+    fast = (x[0] >> 16) & 1;
     reps = (x[0] >> 32) & 0xfff;
+    in_gpa = fast ? 0 : x[1];
+    out_gpa = fast ? 0 : x[2];
 
     if (code == 0x0050) { /* HvGetVpRegisters */
         struct hv_identity_reg *r;
@@ -1809,6 +1814,139 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
             }
             r->val = x[5];
             status = HV_STATUS_SUCCESS;
+        }
+    }
+
+    /*
+     * HvCallNotifyPartitionEvent (memory form). Input
+     * hv_input_notify_partition_event: event at +0, crashdump_action at +4
+     * (hvhdk_mini.h).
+     */
+    if (code == 0x0087) {
+        uint32_t event = 0, action = 0;
+
+        if (in_gpa) {
+            address_space_read(&address_space_memory, in_gpa,
+                               MEMTXATTRS_UNSPECIFIED, &event, sizeof(event));
+            address_space_read(&address_space_memory, in_gpa + 4,
+                               MEMTXATTRS_UNSPECIFIED, &action, sizeof(action));
+        }
+        /*
+         * STATE_SAVED and ENTRY assert a dump was saved or entered; nothing
+         * here saved one, so refuse those two and grant the rest.
+         */
+        if (event == 2 /* ROOT_CRASHDUMP */ &&
+            (action == 3 /* STATE_SAVED */ || action == 4 /* ENTRY */)) {
+            status = HV_STATUS_INVALID_PARAMETER;
+        } else {
+            status = HV_STATUS_SUCCESS;
+        }
+    } else if (code == 0x007b) { /* HvCallGetSystemProperty, memory form */
+        uint32_t prop = 0;
+
+        if (in_gpa) {
+            address_space_read(&address_space_memory, in_gpa,
+                               MEMTXATTRS_UNSPECIFIED, &prop, sizeof(prop));
+        }
+        if (prop == 20 && out_gpa) {
+            /* DMA guard: report not enabled (one byte), the truth */
+            uint8_t off = 0;
+
+            address_space_write(&address_space_memory, out_gpa,
+                                MEMTXATTRS_UNSPECIFIED, &off, sizeof(off));
+            status = HV_STATUS_SUCCESS;
+        } else if (prop == 15 && out_gpa) {
+            /* SCHEDULER_TYPE: root scheduler (u32 out) */
+            uint32_t sched = 4; /* HV_SCHEDULER_TYPE_ROOT */
+
+            address_space_write(&address_space_memory, out_gpa,
+                                MEMTXATTRS_UNSPECIFIED, &sched, sizeof(sched));
+            status = HV_STATUS_SUCCESS;
+        } else {
+            /* Any other property stays unanswered; guest tolerates it. */
+            status = HV_STATUS_INVALID_PARAMETER;
+        }
+    } else if (code == 0x8001) { /* HvExtCallQueryCapabilities */
+        uint64_t caps = 0;
+
+        if (out_gpa) {
+            address_space_write(&address_space_memory, out_gpa,
+                                MEMTXATTRS_UNSPECIFIED, &caps, sizeof(caps));
+            status = HV_STATUS_SUCCESS;
+        }
+    } else if (code == 0x009a) {
+        /*
+         * HvCallGetVpIndexFromApicId, rep call. Header {u64 partition_id,
+         * u8 target_vtl, u8 rsvd[7]}, then one hardware id per rep; on ARM64
+         * the id is the MPIDR affinity.
+         */
+        struct { uint64_t partition_id; uint8_t target_vtl; uint8_t rsvd[7]; }
+            hdr;
+        uint64_t hwid, vp_index;
+        CPUState *target = NULL, *it;
+
+        status = HV_STATUS_INVALID_HYPERCALL_INPUT;
+        if (!fast && in_gpa && out_gpa && reps == 1 &&
+            address_space_read(&address_space_memory, in_gpa,
+                               MEMTXATTRS_UNSPECIFIED, &hdr,
+                               sizeof(hdr)) == MEMTX_OK &&
+            address_space_read(&address_space_memory, in_gpa + sizeof(hdr),
+                               MEMTXATTRS_UNSPECIFIED, &hwid,
+                               sizeof(hwid)) == MEMTX_OK) {
+            if (hdr.partition_id != HV_PARTITION_ID_SELF) {
+                status = HV_STATUS_INVALID_PARTITION_ID;
+            } else if (hdr.target_vtl != 0) {
+                status = HV_STATUS_INVALID_PARAMETER;
+            } else {
+                CPU_FOREACH(it) {
+                    if (ARM_CPU(it)->mp_affinity == (hwid & 0xff00ffffffULL)) {
+                        target = it;
+                        break;
+                    }
+                }
+                if (target) {
+                    vp_index = hyperv_vp_index(target);
+                    address_space_write(&address_space_memory, out_gpa,
+                                        MEMTXATTRS_UNSPECIFIED, &vp_index,
+                                        sizeof(vp_index));
+                    status = HV_STATUS_SUCCESS;
+                } else {
+                    status = HV_STATUS_INVALID_PARAMETER;
+                }
+            }
+        }
+    } else if (code == 0x006f) {
+        /*
+         * Set-system-property. Property 26 (HvlUnblockDefaultDma) and 32
+         * (HvlSetRootFaultReportingReady) commit us to nothing with no guest
+         * IOMMU or device domains, so grant them; refuse and log the rest.
+         */
+        uint32_t prop = fast ? (uint32_t)x[1] : 0;
+
+        if (!fast && in_gpa) {
+            address_space_read(&address_space_memory, in_gpa,
+                               MEMTXATTRS_UNSPECIFIED, &prop, sizeof(prop));
+        }
+        if (fast && (prop == 26 || prop == 32)) {
+            status = HV_STATUS_SUCCESS;
+        } else {
+            qemu_log_mask(LOG_UNIMP, "hyperv: set system property %u (%s)"
+                          " refused\n", prop, fast ? "fast" : "memory");
+            status = HV_STATUS_INVALID_PARAMETER;
+        }
+    } else if (code == 0x0046) {
+        /*
+         * HvCallGetPartitionId: sole root partition, so id 1. Output u64 at
+         * out_gpa.
+         */
+        if (out_gpa) {
+            uint64_t pid = 1;
+
+            address_space_write(&address_space_memory, out_gpa,
+                                MEMTXATTRS_UNSPECIFIED, &pid, sizeof(pid));
+            status = HV_STATUS_SUCCESS;
+        } else {
+            status = HV_STATUS_INVALID_PARAMETER;
         }
     }
 
