@@ -1005,6 +1005,8 @@ struct ArchCPU {
     bool has_el3;
     /* CPU has PMU (Performance Monitor Unit) */
     bool has_pmu;
+    /* PMU interrupt the machine assigned through KVM, 0 if none */
+    int kvm_pmu_irq;
     /* CPU has VFP */
     bool has_vfp;
     /* CPU has 32 VFP registers */

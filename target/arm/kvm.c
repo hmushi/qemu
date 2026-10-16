@@ -45,7 +45,10 @@
 #include "hw/acpi/ghes.h"
 #include "target/arm/gtimer.h"
 #include "migration/blocker.h"
+#include "hw/hyperv/vsm-plane-api.h"
+#include "hw/hyperv/vsm-core.h"
 #include "hw/hyperv/hyperv-vsm-arm.h"
+#include "hyperv-vsm.h"
 #include "hyperv-arm.h"
 #include "hw/arm/virt.h"
 
@@ -667,6 +670,11 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         ret = -EINVAL;
     }
 
+    /* Hyper-V VSM on KVM planes: the HVC #2/#3 exits, before any vCPU runs */
+    if (!ret) {
+        ret = hyperv_vsm_arm_init(s);
+    }
+
     if (kvm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
         if (kvm_vm_enable_cap(s, KVM_CAP_ARM_NISV_TO_USER, 0)) {
             error_report("Failed to enable KVM_CAP_ARM_NISV_TO_USER cap");
@@ -1150,8 +1158,9 @@ bool kvm_arm_cpu_post_load(ARMCPU *cpu)
     return true;
 }
 
-void kvm_arm_reset_vcpu(ARMCPU *cpu)
+static void kvm_arm_reset_vcpu_work(CPUState *cs, run_on_cpu_data arg)
 {
+    ARMCPU *cpu = ARM_CPU(cs);
     int ret;
 
     /* Re-init VCPU so that all registers are set to
@@ -1174,6 +1183,25 @@ void kvm_arm_reset_vcpu(ARMCPU *cpu)
      * for the same reason we do so in kvm_arch_get_registers().
      */
     write_list_to_cpustate(cpu);
+}
+
+void kvm_arm_reset_vcpu(ARMCPU *cpu)
+{
+    CPUState *cs = CPU(cpu);
+    /* a plane > 0 vCPU is driven by its leader's thread */
+    CPUState *owner = cs->kvm_plane_leader ?: cs;
+
+    /*
+     * KVM_ARM_VCPU_INIT and the register reads behind it are vCPU ioctls.
+     * Once the VM has planes KVM refuses those from a thread that did not
+     * run the vCPU, so a guest-triggered reset runs them on the owning
+     * thread. A cold reset precedes that thread and runs inline.
+     */
+    if (owner->created) {
+        run_on_cpu(cs, kvm_arm_reset_vcpu_work, RUN_ON_CPU_NULL);
+    } else {
+        kvm_arm_reset_vcpu_work(cs, RUN_ON_CPU_NULL);
+    }
 }
 
 /*
@@ -1209,6 +1237,19 @@ static int kvm_arm_sync_mpstate_to_qemu(ARMCPU *cpu)
     return 0;
 }
 
+static void kvm_arm_vtime_failed(ARMCPU *cpu, const char *op, int ret)
+{
+    CPUState *cs = CPU(cpu);
+    CPUState *leader = cs->kvm_plane_leader;
+
+    error_report("Failed to %s KVM_REG_ARM_TIMER_CNT: %s (ret=%d) "
+                 "cpu_index=%d kvm_fd=%d plane=%d role=%s leader_index=%d",
+                 op, strerror(-ret), ret, cs->cpu_index,
+                 cpu_kvm_plane(cs, 0)->kvm_fd,
+                 cs->kvm_plane, leader ? "sibling" : "leader",
+                 leader ? leader->cpu_index : cs->cpu_index);
+}
+
 /**
  * kvm_arm_get_virtual_time:
  * @cpu: ARMCPU
@@ -1225,7 +1266,7 @@ static void kvm_arm_get_virtual_time(ARMCPU *cpu)
 
     ret = kvm_get_one_reg(CPU(cpu), KVM_REG_ARM_TIMER_CNT, &cpu->kvm_vtime);
     if (ret) {
-        error_report("Failed to get KVM_REG_ARM_TIMER_CNT");
+        kvm_arm_vtime_failed(cpu, "get", ret);
         abort();
     }
 
@@ -1248,7 +1289,7 @@ static void kvm_arm_put_virtual_time(ARMCPU *cpu)
 
     ret = kvm_set_one_reg(CPU(cpu), KVM_REG_ARM_TIMER_CNT, &cpu->kvm_vtime);
     if (ret) {
-        error_report("Failed to set KVM_REG_ARM_TIMER_CNT");
+        kvm_arm_vtime_failed(cpu, "set", ret);
         abort();
     }
 
@@ -1386,6 +1427,11 @@ void kvm_arch_pre_run(CPUState *cs, struct kvm_run *run)
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
 
+    /* VTL bookkeeping of a VP that has planes */
+    if (cpu_is_plane_sibling(cs) || cs->kvm_plane_next) {
+        hv_plane_pre_run(cs, run);
+    }
+
     if (unlikely(env->ext_dabt_raised)) {
         /*
          * Verifying that the ext DABT has been properly injected,
@@ -1462,19 +1508,27 @@ MemTxAttrs kvm_arch_post_run(CPUState *cs, struct kvm_run *run)
     return MEMTXATTRS_UNSPECIFIED;
 }
 
+static void kvm_arm_vtime_work(CPUState *cs, run_on_cpu_data arg)
+{
+    if (arg.host_int) {
+        kvm_arm_put_virtual_time(ARM_CPU(cs));
+    } else {
+        kvm_arm_get_virtual_time(ARM_CPU(cs));
+    }
+}
+
 static void kvm_arm_vm_state_change(void *opaque, bool running, RunState state)
 {
     ARMCPU *cpu = opaque;
 
-    if (running) {
-        if (cpu->kvm_adjvtime) {
-            kvm_arm_put_virtual_time(cpu);
-        }
-    } else {
-        if (cpu->kvm_adjvtime) {
-            kvm_arm_get_virtual_time(cpu);
-        }
+    if (!cpu->kvm_adjvtime) {
+        return;
     }
+    /*
+     * Once the VM has planes, KVM refuses a vCPU ioctl from a thread that did
+     * not run the vCPU, so adjust the counter on the vCPU's own thread.
+     */
+    run_on_cpu(CPU(cpu), kvm_arm_vtime_work, RUN_ON_CPU_HOST_INT(running));
 }
 
 /**
@@ -1515,6 +1569,26 @@ static int kvm_arm_handle_dabt_nisv(ARMCPU *cpu, uint64_t esr_iss,
         error_printf("KVM unable to emulate faulting instruction.\n");
     }
     return -1;
+}
+
+/*
+ * KVM_CAP_ARM_HVC_IMM_EXITS: an HVC whose immediate is in the mask exits here
+ * before SMCCC dispatch, nr carrying the immediate. Hyper-V switches VTLs with
+ * HVC #2 (call) and HVC #3 (return). ret 0 is handled; non-zero makes KVM
+ * inject an undefined-instruction exception at the HVC.
+ */
+static int kvm_arm_handle_hypercall(CPUState *cs, struct kvm_run *run)
+{
+    if (!(run->hypercall.flags & KVM_HYPERCALL_EXIT_HVC_IMM)) {
+        qemu_log_mask(LOG_UNIMP, "%s: SMCCC exit for function 0x%" PRIx64
+                      " without a filter\n", __func__,
+                      (uint64_t)run->hypercall.nr);
+        return -1;
+    }
+
+    trace_kvm_arm_hvc_imm_exit(cs->cpu_index, cs->kvm_plane,
+                               (uint64_t)run->hypercall.nr);
+    return hyperv_vsm_arm_handle_hvc_imm(cs, run);
 }
 
 /**
@@ -1617,6 +1691,7 @@ struct hv_start_vp_arm64 {
 
 typedef struct HvVpStartWork {
     struct hv_start_vp_arm64 in;
+    CPUState *start_plane;
 } HvVpStartWork;
 
 /* On the target's own thread: load the supplied context and run it at EL1h. */
@@ -1644,6 +1719,14 @@ static void hv_vp_start_work(CPUState *cs, run_on_cpu_data arg)
 
     arm_set_cpu_power_state(cpu, PSCI_ON);
     cs->halted = 0;
+    /*
+     * VSM AP bringup: if VTL1 is enabled on this VP, select its securekernel
+     * plane to run before VTL0 so it initialises and checks in.
+     */
+    if (w->start_plane && w->start_plane != cs) {
+        w->start_plane->halted = 0;
+        hv_plane_select_start(w->start_plane);
+    }
     cs->vcpu_dirty = true;
     g_free(w);
 }
@@ -1750,9 +1833,11 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
         } else if (name == 0x200) {
             /*
              * PrivilegesAndFeaturesInfo mask; upper half is CPUID leaf 3 EBX
-             * (HV_PARTITION_PRIVILEGE_MASK).
+             * (HV_PARTITION_PRIVILEGE_MASK). With VSM: AccessVsm (bit 48),
+             * AccessVpRegisters (49), StartVirtualProcessor (53).
              */
-            lo = 0;
+            lo = virt_hv_vsm() ? (1ULL << 1) | (1ULL << 9) | (1ULL << 48) | (1ULL << 49) |
+                                    (1ULL << 53) : 0;
             status = HV_STATUS_SUCCESS;
         } else if (name >= 0x201 && name <= 0x20f) {
             status = HV_STATUS_SUCCESS; /* feature-access leaf: honest zero */
@@ -1773,6 +1858,9 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
              * reading 0x204.
              */
             lo = (1ULL << 62);
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0xd0006) { /* HvRegisterVsmCapabilities */
+            lo = hv_vsm.capabilities.as_uint64;
             status = HV_STATUS_SUCCESS;
         } else if ((r = hv_identity_reg_find(name)) != NULL) {
             lo = r->val;
@@ -1974,6 +2062,7 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
                 } else {
                     w = g_new(HvVpStartWork, 1);
                     w->in = in;
+                    w->start_plane = hv_plane_vcpu(in.vp_index, 1);
                     /* claim the processor now so a second start is refused */
                     arm_set_cpu_power_state(ARM_CPU(target), PSCI_ON);
                     async_run_on_cpu(target, hv_vp_start_work,
@@ -2081,6 +2170,43 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
         }
     }
 
+    /*
+     * An unclaimed register name (status still INVALID_PARAMETER) falls
+     * through to the VSM core. Fast-form input is the TLFS block from x1 up
+     * (hv_input_get/set_vp_registers): x1 partition, x2 VP index (low) and
+     * input VTL (byte 4), x3 name, x5/x6 the 128-bit set value. Memory form
+     * is not served for these codes.
+     */
+    if (fast && (code == 0x0050 || code == 0x0051) &&
+        status == HV_STATUS_INVALID_PARAMETER &&
+        x[1] == HV_PARTITION_ID_SELF) {
+        union hv_input_vtl in_vtl = { .as_uint8 = (x[2] >> 32) & 0xff };
+        uint64_t value[2] = { x[5], x[6] };
+        uint32_t vp = (uint32_t)x[2];
+        int vtl;
+
+        if (input_vtl_targets(in_vtl)) {
+            vtl = in_vtl.target_vtl;
+        } else {
+            vtl = active_vtl(cs);
+        }
+        if (vp == HV_VP_INDEX_SELF) {
+            vp = hyperv_vp_index(cs);
+        }
+
+        if (vtl > active_vtl(cs)) {
+            /* a lower VTL may not reach a higher one's registers */
+            status = HV_STATUS_INVALID_VP_STATE;
+        } else {
+            status = hv_arm_vp_register_fallback(code == 0x0051, vp, vtl,
+                                                 name, value);
+            if (code == 0x0050 && status == HV_STATUS_SUCCESS) {
+                lo = value[0];
+                hi = value[1];
+            }
+        }
+    }
+
     env->xregs[0] = (reps_completed << 32) | status;
     if (code == 0x0050 && status == HV_STATUS_SUCCESS) {
         /*
@@ -2107,6 +2233,12 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
     ARMCPU *cpu = ARM_CPU(cs);
     int ret = 0;
 
+    /* HVC #2/#3 (VSM VTL call/return) before the SMCCC hypercall path */
+    if (run->exit_reason == KVM_EXIT_HYPERCALL &&
+        (run->hypercall.flags & KVM_HYPERCALL_EXIT_HVC_IMM)) {
+        return kvm_arm_handle_hypercall(cs, run);
+    }
+
     switch (run->exit_reason) {
     case KVM_EXIT_DEBUG:
         if (kvm_arm_handle_debug(cpu, &run->debug.arch)) {
@@ -2117,6 +2249,22 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         /* External DABT with no valid iss to decode */
         ret = kvm_arm_handle_dabt_nisv(cpu, run->arm_nisv.esr_iss,
                                        run->arm_nisv.fault_ipa);
+        break;
+    case KVM_EXIT_MEMORY_FAULT:
+        /* RWX fault on a VTL-protected page (kvm-all.c keeps the others) */
+        if (!(run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE_PROT)) {
+            error_report("KVM_EXIT_MEMORY_FAULT: access fault outside the "
+                         "plane attributes (flags 0x%" PRIx64 " on plane %d)",
+                         (uint64_t)run->memory_fault.flags, cs->kvm_plane);
+            ret = -1;
+            break;
+        }
+        ret = kvm_hv_handle_fault(cs, run->memory_fault.gpa,
+                                  run->memory_fault.size,
+                                  run->memory_fault.flags);
+        break;
+    case KVM_EXIT_PLANE_EVENT:
+        ret = hv_plane_vtl_event(cs, run);
         break;
     case KVM_EXIT_HYPERCALL:
         kvm_arm_hv_hypercall(cs, run);
@@ -2437,6 +2585,7 @@ void kvm_arm_pmu_set_irq(ARMCPU *cpu, int irq)
         error_report("failed to set irq for PMU");
         abort();
     }
+    cpu->kvm_pmu_irq = irq;
 }
 
 void kvm_arm_pvtime_init(ARMCPU *cpu, uint64_t ipa)
@@ -2532,7 +2681,10 @@ int kvm_arch_init_vcpu(CPUState *cs)
         return -EINVAL;
     }
 
-    qemu_add_vm_change_state_handler(kvm_arm_vm_state_change, cpu);
+    /* The planes of a VP share one virtual counter; its leader adjusts it. */
+    if (!cpu_is_plane_sibling(cs)) {
+        qemu_add_vm_change_state_handler(kvm_arm_vm_state_change, cpu);
+    }
 
     /* Determine init features for this CPU */
     memset(cpu->kvm_init_features, 0, sizeof(cpu->kvm_init_features));
@@ -2581,6 +2733,20 @@ int kvm_arch_init_vcpu(CPUState *cs)
         }
     }
 
+    /*
+     * The machine gives a plane-0 vCPU its PMU after KVM_ARM_VCPU_INIT. A
+     * sibling is created later, by a hypercall, so it inherits the PMU
+     * feature bit and no PMU. KVM then refuses its first KVM_RUN.
+     */
+    if (cpu_is_plane_sibling(cs) && cpu->has_pmu) {
+        ARMCPU *leader = ARM_CPU(cs->kvm_plane_leader);
+
+        if (leader->kvm_pmu_irq) {
+            kvm_arm_pmu_set_irq(cpu, leader->kvm_pmu_irq);
+        }
+        kvm_arm_pmu_init(cpu);
+    }
+
     if (cpu->psci_version) {
         psciver = cpu->psci_version;
         ret = kvm_set_one_reg(cs, KVM_REG_ARM_PSCI_VERSION, &psciver);
@@ -2614,6 +2780,11 @@ int kvm_arch_init_vcpu(CPUState *cs)
         return ret;
     }
     cpu->mp_affinity = mpidr & ARM64_AFFINITY_MASK;
+
+    ret = hyperv_vsm_arm_init_vcpu(cs);
+    if (ret) {
+        return ret;
+    }
 
     return kvm_arm_init_cpreg_list(cpu);
 }
