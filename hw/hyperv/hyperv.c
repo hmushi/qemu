@@ -157,11 +157,13 @@ static void synic_realize(DeviceState *dev, Error **errp)
     SynICState *synic = SYNIC(dev);
     char *msgp_name, *eventp_name;
     uint32_t vp_index;
+    int vtl;
 
-    /* memory region names have to be globally unique */
+    /* memory region names have to be globally unique; one SynIC per VTL */
     vp_index = hyperv_vp_index(synic->cs);
-    msgp_name = g_strdup_printf("synic-%u-msg-page", vp_index);
-    eventp_name = g_strdup_printf("synic-%u-event-page", vp_index);
+    vtl = hv_plane_active_vtl(synic->cs);
+    msgp_name = g_strdup_printf("synic-%u-%d-msg-page", vp_index, vtl);
+    eventp_name = g_strdup_printf("synic-%u-%d-event-page", vp_index, vtl);
 
     memory_region_init_ram(&synic->msg_page_mr, obj, msgp_name,
                            sizeof(*synic->msg_page), &error_abort);
@@ -280,6 +282,7 @@ typedef struct HvSintStagedMessage {
 struct HvSintRoute {
     uint32_t sint;
     uint32_t vp_index;
+    uint8_t vtl;
     SynICState *synic;
     int gsi;
     bool gsi_valid;
@@ -294,9 +297,9 @@ struct HvSintRoute {
     QLIST_ENTRY(HvSintRoute) link;
 };
 
-static CPUState *hyperv_find_vcpu(uint32_t vp_index)
+static CPUState *hyperv_find_vcpu(uint32_t vp_index, uint8_t vtl)
 {
-    return qemu_get_cpu(vp_index);
+    return hv_plane_vcpu(vp_index, vtl);
 }
 
 /*
@@ -437,12 +440,17 @@ int hyperv_set_event_flag(HvSintRoute *sint_route, unsigned eventno)
     return ret;
 }
 
-static int kvm_irqchip_add_hv_sint_route(KVMState *s, uint32_t vcpu, uint32_t sint)
+static int kvm_irqchip_add_hv_sint_route(KVMState *s, uint32_t vcpu,
+                                         uint32_t sint, int vtl)
 {
     struct kvm_irq_routing_entry kroute = {};
     int virq;
 
     if (!kvm_gsi_routing_enabled()) {
+        return -ENOSYS;
+    }
+    /* the routing table names the plane-0 vCPU's in-kernel SynIC only */
+    if (vtl != 0) {
         return -ENOSYS;
     }
     virq = kvm_irqchip_get_virq(s);
@@ -478,7 +486,7 @@ static int sint_route_arm(HvSintRoute *sint_route)
         sint_route->gsi = -1;
         sint_route->gsi_valid = true;
         trace_hyperv_vsm_sint_route_armed(sint_route->vp_index,
-                                          sint_route->sint,
+                                          sint_route->vtl, sint_route->sint,
                                           -1);
         return 0;
     }
@@ -487,7 +495,7 @@ static int sint_route_arm(HvSintRoute *sint_route)
         return r;
     }
     gsi = kvm_irqchip_add_hv_sint_route(s, sint_route->vp_index,
-                                        sint_route->sint);
+                                        sint_route->sint, sint_route->vtl);
     if (gsi < 0) {
         event_notifier_cleanup(&sint_route->sint_set_notifier);
         return gsi;
@@ -501,7 +509,7 @@ static int sint_route_arm(HvSintRoute *sint_route)
     }
     sint_route->gsi = gsi;
     sint_route->gsi_valid = true;
-    trace_hyperv_vsm_sint_route_armed(sint_route->vp_index,
+    trace_hyperv_vsm_sint_route_armed(sint_route->vp_index, sint_route->vtl,
                                   sint_route->sint, gsi);
     return 0;
 }
@@ -518,7 +526,7 @@ static void synic_arm_routes(SynICState *synic)
     qemu_mutex_unlock(&synic->sint_routes_mutex);
 }
 
-HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint32_t sint,
+HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint,
                                    HvSintMsgCb cb, void *cb_data)
 {
     HvSintRoute *sint_route = NULL;
@@ -528,7 +536,7 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint32_t sint,
     SynICState *synic;
     bool ack_event_initialized = false;
 
-    cs = hyperv_find_vcpu(vp_index);
+    cs = hyperv_find_vcpu(vp_index, vtl);
     if (!cs) {
         return NULL;
     }
@@ -546,6 +554,7 @@ HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint32_t sint,
     sint_route->synic = synic;
     sint_route->sint = sint;
     sint_route->vp_index = vp_index;
+    sint_route->vtl = vtl;
     sint_route->refcount = 1;
 
     ack_notifier = cb ? &sint_route->sint_ack_notifier : NULL;

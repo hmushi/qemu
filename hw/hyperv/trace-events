@@ -35,7 +35,7 @@ hv_balloon_remove_response_common(uint64_t countcommon, uint64_t startcommon, ui
 hv_balloon_remove_response_remainder(uint64_t count, uint64_t start, unsigned int both) "remove response remaining range %"PRIu64" @ 0x%"PRIx64", both %u"
 hv_balloon_map_slot(unsigned int idx, unsigned int total_slots, uint64_t offset) "mapping memslot %u / %u @ 0x%"PRIx64
 hv_balloon_unmap_slot(unsigned int idx, unsigned int total_slots, uint64_t offset) "unmapping memslot %u / %u @ 0x%"PRIx64
-hyperv_vsm_sint_route_armed(uint32_t vp_index, uint32_t sint, int gsi) "VP %u SINT%u gsi %d"
+hyperv_vsm_sint_route_armed(uint32_t vp_index, uint8_t vtl, uint32_t sint, int gsi) "VP %u VTL%u SINT%u gsi %d"
 
 # vsm-planes.c
 hyperv_vsm_plane_create(int vtl, int ret) "VTL%d plane created: %d"

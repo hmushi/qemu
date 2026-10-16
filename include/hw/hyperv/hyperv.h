@@ -22,7 +22,8 @@ typedef struct HvSintRoute HvSintRoute;
  */
 typedef void (*HvSintMsgCb)(void *data, int status);
 
-HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint32_t sint,
+/* @vtl selects the SynIC of that VTL; plane-0 callers pass 0 */
+HvSintRoute *hyperv_sint_route_new(uint32_t vp_index, uint8_t vtl, uint32_t sint,
                                    HvSintMsgCb cb, void *cb_data);
 void hyperv_sint_route_ref(HvSintRoute *sint_route);
 void hyperv_sint_route_unref(HvSintRoute *sint_route);
