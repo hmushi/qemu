@@ -50,3 +50,4 @@ kvm_arm_hv_icache_sweep(unsigned count) "icache sweep broadcast hypercall, count
 kvm_arm_hv_start_vp(uint32_t vp, uint64_t pc, uint64_t sp, uint64_t ttbr1) "StartVirtualProcessor vp=%u pc=0x%" PRIx64 " sp=0x%" PRIx64 " ttbr1=0x%" PRIx64
 hyperv_vsm_arm_translate_input(uint32_t vp_index, int vtl, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) "VP %u VTL%d x0 0x%" PRIx64 " x1 0x%" PRIx64 " x2 0x%" PRIx64 " x3 0x%" PRIx64 " x4 0x%" PRIx64
 hyperv_vsm_arm_pending_event(uint32_t vp_index, int vtl, uint64_t lo, uint64_t hi) "VP %u VTL%d PendingEvent0 0x%" PRIx64 " 0x%" PRIx64
+hyperv_vsm_arm_dismiss_unexpected_interrupts(uint64_t base, uint32_t was) "ntoskrnl 0x%" PRIx64 " KiBugCheckUnexpectedInterrupts was 0x%x, now 0"

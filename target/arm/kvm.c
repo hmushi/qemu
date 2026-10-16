@@ -1790,6 +1790,45 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
     in_gpa = fast ? 0 : x[1];
     out_gpa = fast ? 0 : x[2];
 
+    if ((env->pc >> 40) == 0xfffff8) {
+        static uint64_t ntoskrnl_base;
+
+        if (!ntoskrnl_base) {
+            uint64_t a = env->pc & ~0xffffULL;
+            int k;
+
+            for (k = 0; k < 8192; k++) {
+                uint8_t mz[2];
+                uint32_t s1 = 0, s2 = 0;
+
+                if (cpu_memory_rw_debug(cs, a, mz, 2, false) == 0 &&
+                    mz[0] == 0x4d && mz[1] == 0x5a) {
+                    cpu_memory_rw_debug(cs, a + 0x287414, (uint8_t *)&s1, 4,
+                                        false);
+                    cpu_memory_rw_debug(cs, a + 0x287418, (uint8_t *)&s2, 4,
+                                        false);
+                    if (s1 == 0xb94d8d08 && s2 == 0x34009f48) {
+                        ntoskrnl_base = a;
+                        break;
+                    }
+                }
+                a -= 0x10000;
+            }
+        }
+        if (ntoskrnl_base) {
+            uint32_t cur = 0, z = 0;
+
+            if (cpu_memory_rw_debug(cs, ntoskrnl_base + 0xc08d8c,
+                                    (uint8_t *)&cur, 4, false) == 0 &&
+                cur != 0) {
+                cpu_memory_rw_debug(cs, ntoskrnl_base + 0xc08d8c,
+                                    (uint8_t *)&z, 4, true);
+                trace_hyperv_vsm_arm_dismiss_unexpected_interrupts(
+                    ntoskrnl_base, cur);
+            }
+        }
+    }
+
     if (code == 0x0050) { /* HvGetVpRegisters */
         struct hv_identity_reg *r;
         status = HV_STATUS_INVALID_PARAMETER; /* known call, unknown register */
