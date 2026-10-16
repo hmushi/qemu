@@ -1110,6 +1110,8 @@ struct ArchCPU {
     uint64_t pmceid0;
     uint64_t pmceid1;
     uint64_t mp_affinity; /* MP ID without feature bits */
+    /* HvRegisterGuestOsId, set by Hyper-V VSM through HvCallSetVpRegisters */
+    uint64_t hyperv_guest_os_id;
     /* The elements of this array are the CCSIDR values for each cache,
      * in the order L1DCache, L1ICache, L2DCache, L2ICache, etc.
      */

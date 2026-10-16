@@ -32,6 +32,20 @@ cpu_post_load(uint32_t cpreg_vmstate_array_len, uint32_t cpreg_array_len) "cpreg
 tolerate_cpreg_missing_in_incoming_stream(char *name) "%s is missing in incoming stream but this is explicitly tolerated"
 tolerate_cpreg_only_in_incoming_stream(char *name) "%s is in incoming stream but not on destination but this is explicitly tolerated"
 
+# hyperv-vsm.c
+hyperv_vsm_arm_vtl_switch(uint32_t vp_index, int from_vtl, int to_vtl, int reason, uint64_t from_pc, uint64_t to_pc) "VP %u VTL%d -> VTL%d reason %d pc 0x%" PRIx64 " -> 0x%" PRIx64
+hyperv_vsm_arm_vp_context(uint32_t vp_index, int vtl, uint64_t pc, uint64_t sp, uint64_t sctlr, uint64_t ttbr0, uint64_t ttbr1, uint64_t vbar, uint64_t tcr, uint64_t gpa) "VP %u VTL%d pc 0x%" PRIx64 " sp 0x%" PRIx64 " sctlr 0x%" PRIx64 " ttbr0 0x%" PRIx64 " ttbr1 0x%" PRIx64 " vbar 0x%" PRIx64 " tcr 0x%" PRIx64 " from 0x%" PRIx64
+hyperv_vsm_arm_vp_register(bool set, uint32_t vp_index, int vtl, uint32_t name, uint64_t val) "set %d VP %u VTL%d register 0x%x value 0x%" PRIx64
+hyperv_vsm_arm_vp_assist_page(uint32_t vp_index, int vtl, bool enable, uint64_t gpa) "VP %u VTL%d enable %d gpa 0x%" PRIx64
+hyperv_vsm_arm_hvc_imm(uint32_t vp_index, int vtl, uint64_t imm, uint64_t status, int ret) "VP %u VTL%d HVC #%" PRIu64 " status 0x%" PRIx64 " ret %d"
+hyperv_vsm_arm_memory_intercept(uint32_t vp_index, int vtl, uint64_t pc, uint64_t gpa, int access, int insn_bytes, uint32_t insn, int gva_valid, uint64_t syndrome) "VP %u VTL%d pc 0x%" PRIx64 " gpa 0x%" PRIx64 " access %d insn bytes %d insn 0x%08x gva_valid %d syndrome 0x%" PRIx64
+hyperv_vsm_arm_plane_sgi(uint32_t vp_index, int vtl, unsigned intid, bool level, int ret) "VP %u VTL%d SGI %u level %d: %d"
+hyperv_vsm_arm_synic_sint(uint32_t vp_index, int vtl, unsigned sint, uint64_t val, int intid, bool masked) "VP %u VTL%d SINT%u = 0x%" PRIx64 " SGI INTID %d masked %d"
+hyperv_vsm_arm_vina_sgi(uint32_t vp_index, int vtl, int intid, bool level) "VP %u VTL%d VINA SGI INTID %d level %d"
+hyperv_vsm_arm_intercept_post(uint32_t vp_index, int vtl, uint32_t type, bool armed, uint64_t sint0, int ret) "VP %u VTL%d message 0x%x route armed %d SINT0 0x%" PRIx64 ": %d"
+
 # kvm.c Hyper-V
 kvm_arm_hv_icache_sweep(unsigned count) "icache sweep broadcast hypercall, count so far %u"
 kvm_arm_hv_start_vp(uint32_t vp, uint64_t pc, uint64_t sp, uint64_t ttbr1) "StartVirtualProcessor vp=%u pc=0x%" PRIx64 " sp=0x%" PRIx64 " ttbr1=0x%" PRIx64
+hyperv_vsm_arm_translate_input(uint32_t vp_index, int vtl, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) "VP %u VTL%d x0 0x%" PRIx64 " x1 0x%" PRIx64 " x2 0x%" PRIx64 " x3 0x%" PRIx64 " x4 0x%" PRIx64
+hyperv_vsm_arm_pending_event(uint32_t vp_index, int vtl, uint64_t lo, uint64_t hi) "VP %u VTL%d PendingEvent0 0x%" PRIx64 " 0x%" PRIx64

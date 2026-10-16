@@ -31,4 +31,14 @@ int hv_arm_register_hcall(uint16_t code, hv_arm_hcall_fn fn);
 /* The handler registered for @code, or NULL. */
 hv_arm_hcall_fn hv_arm_hcall_handler(uint16_t code);
 
+/*
+ * HvCallGet/SetVpRegisters for a @name outside the dispatcher's own store:
+ * the VSM block (0x000D0000..) and the ARM64 VP registers (0x00020000..,
+ * hvdef HvArm64RegisterName) of @vp at @vtl. @set false reads into @value
+ * (two 64-bit halves), true writes from it. Returns the HV_STATUS_* code,
+ * HV_STATUS_INVALID_PARAMETER for an unknown name.
+ */
+uint16_t hv_arm_vp_register_fallback(bool set, uint32_t vp, int vtl,
+                                     uint32_t name, uint64_t value[2]);
+
 #endif

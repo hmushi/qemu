@@ -9,6 +9,8 @@ config ARM_VIRT
     imply TPM_TIS_I2C
     imply NVDIMM
     imply IOMMUFD
+    imply HYPERV
+    imply HYPERV_VSM_PLANES
     select ARM_GIC
     select ARM_GICV5 if TCG
     select ACPI

@@ -33,6 +33,8 @@ arm_common_system_ss.add(files(
 ))
 arm_system_ss.add(when: 'CONFIG_KVM', if_true: files('hyp_gdbstub.c', 'kvm.c',
                                                      'hyperv-arm-stub.c'))
+arm_system_ss.add(when: 'CONFIG_HYPERV', if_true: files('hyperv-vsm.c'),
+                  if_false: files('hyperv-vsm-stub.c'))
 arm_system_ss.add(when: 'CONFIG_HVF', if_true: files('hyp_gdbstub.c'))
 
 arm_user_ss.add(files('cpu.c'))

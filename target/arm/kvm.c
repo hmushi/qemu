@@ -45,7 +45,7 @@
 #include "hw/acpi/ghes.h"
 #include "target/arm/gtimer.h"
 #include "migration/blocker.h"
-#include "hw/hyperv/hyperv-vsm-proto.h"
+#include "hw/hyperv/hyperv-vsm-arm.h"
 #include "hyperv-arm.h"
 #include "hw/arm/virt.h"
 
@@ -1671,43 +1671,6 @@ static struct hv_identity_reg *hv_identity_reg_find(uint32_t name)
         }
     }
     return NULL;
-}
-
-/*
- * Fast HVC #1 output is right-anchored at x16, not left-anchored as in the
- * TLFS: the Windows call stub stores M output pairs through the tail of an
- * stp ladder ending at x15/x16, so pair 0 lands in x(17 - 2M). x17 is the
- * stub's scratch.
- */
-#define HV_ARM_FAST_OUT_PAIRS_MAX 8
-
-/* First register of output pair 0, or 0 if @pairs does not fit x1 to x16. */
-static inline unsigned hv_arm_fast_out_first(unsigned pairs)
-{
-    if (pairs == 0 || pairs > HV_ARM_FAST_OUT_PAIRS_MAX) {
-        return 0;
-    }
-    return 17 - 2 * pairs;
-}
-
-/*
- * Write @pairs output pairs from @val into @xregs, pair 0 first. Registers
- * outside the window keep their values, as the TLFS volatile-register rule
- * requires. Returns false and writes nothing if the pairs do not fit.
- */
-static inline bool hv_arm_fast_out(uint64_t *xregs, const uint64_t *val,
-                                   unsigned pairs)
-{
-    unsigned first = hv_arm_fast_out_first(pairs);
-    unsigned i;
-
-    if (first == 0) {
-        return false;
-    }
-    for (i = 0; i < pairs * 2; i++) {
-        xregs[first + i] = val[i];
-    }
-    return true;
 }
 
 /*

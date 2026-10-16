@@ -1593,6 +1593,14 @@ bool virt_hv_identity(void)
            VIRT_MACHINE(ms)->hv_identity;
 }
 
+bool virt_hv_vsm(void)
+{
+    Object *ms = qdev_get_machine();
+
+    return object_dynamic_cast(ms, TYPE_VIRT_MACHINE) &&
+           VIRT_MACHINE(ms)->hv_vsm;
+}
+
 bool virt_hv_overlay_alias(hwaddr gpa, bool map)
 {
     MemoryRegion *sysmem = get_system_memory();
@@ -3707,6 +3715,20 @@ static void virt_set_hv_identity(Object *obj, bool value, Error **errp)
     vms->hv_identity = value;
 }
 
+static bool virt_get_hv_vsm(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->hv_vsm;
+}
+
+static void virt_set_hv_vsm(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->hv_vsm = value;
+}
+
 static bool virt_get_its_kvm_program(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -4481,6 +4503,15 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "Set off to leave the Hyper-V "
                                           "vendor identity out of the FADT "
                                           "(default on)");
+
+    object_class_property_add_bool(oc, "hv-vsm",
+                                   virt_get_hv_vsm,
+                                   virt_set_hv_vsm);
+    object_class_property_set_description(oc, "hv-vsm",
+                                          "Set on to offer Virtual Secure "
+                                          "Mode (AccessVsm) to a Hyper-V "
+                                          "guest, needs KVM planes "
+                                          "(default off)");
 
     object_class_property_add_bool(oc, "its-kvm-program",
                                    virt_get_its_kvm_program,

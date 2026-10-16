@@ -181,6 +181,7 @@ struct VirtMachineState {
     bool gic_security_extn;
     bool its_kvm_program;
     bool hv_identity;
+    bool hv_vsm;
     bool mte;
     bool dtb_randomness;
     bool second_ns_uart_present;
@@ -271,6 +272,8 @@ static inline int virt_gicv3_redist_region_count(VirtMachineState *vms)
 hwaddr virt_hv_overlay_base(void);
 /* hv-identity: does the FADT name Hyper-V, so the guest makes its hypercalls */
 bool virt_hv_identity(void);
+/* hv-vsm: does the machine offer Virtual Secure Mode to a Hyper-V guest */
+bool virt_hv_vsm(void);
 /*
  * Alias the same page at gpa, or unmap the alias when map is false.
  * Returns false when gpa lies beyond the guest physical address space.
