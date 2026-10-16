@@ -1928,6 +1928,18 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
                                 MEMTXATTRS_UNSPECIFIED, &caps, sizeof(caps));
             status = HV_STATUS_SUCCESS;
         }
+    } else if (code == 0x0019) {
+        /*
+         * Remote half of KeSweepIcacheRange. The guest's ic ialluis already
+         * broadcasts across the inner-shareable domain in hardware, so the
+         * work is done before the call arrives: success, no action.
+         */
+        static unsigned n_icache_sweeps;
+
+        if (!(n_icache_sweeps++ % 8192)) {
+            trace_kvm_arm_hv_icache_sweep(n_icache_sweeps - 1);
+        }
+        status = HV_STATUS_SUCCESS;
     } else if (code == 0x009a) {
         /*
          * HvCallGetVpIndexFromApicId, rep call. Header {u64 partition_id,

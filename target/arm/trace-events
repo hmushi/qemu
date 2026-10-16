@@ -33,4 +33,5 @@ tolerate_cpreg_missing_in_incoming_stream(char *name) "%s is missing in incoming
 tolerate_cpreg_only_in_incoming_stream(char *name) "%s is in incoming stream but not on destination but this is explicitly tolerated"
 
 # kvm.c Hyper-V
+kvm_arm_hv_icache_sweep(unsigned count) "icache sweep broadcast hypercall, count so far %u"
 kvm_arm_hv_start_vp(uint32_t vp, uint64_t pc, uint64_t sp, uint64_t ttbr1) "StartVirtualProcessor vp=%u pc=0x%" PRIx64 " sp=0x%" PRIx64 " ttbr1=0x%" PRIx64
