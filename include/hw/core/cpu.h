@@ -466,6 +466,13 @@ struct qemu_work_item;
  *    ring is enabled.
  * @kvm_fetch_index: Keeps the index that we last fetched from the per-vCPU
  *    dirty ring structure.
+ * @kvm_plane: KVM plane of the vCPU this CPUState drives.
+ * @kvm_plane_state: KVM state by plane; slot 0 takes this CPUState's ioctls
+ *    and a plane > 0 CPUState also reaches it as slot @kvm_plane.
+ * @kvm_plane_leader: for a plane > 0 vCPU, the plane-0 CPUState whose
+ *    thread, kvm_run page and halt condition it shares.
+ * @kvm_plane_next: on the leader, the list of its plane > 0 vCPUs.
+ * @kvm_plane_active: on the leader, the CPUState the thread runs next.
  *
  * @neg_align: The CPUState is the common part of a concrete ArchCPU
  * which is allocated when an individual CPU instance is created. As
@@ -547,8 +554,11 @@ struct CPUState {
     uint64_t dirty_pages;
 
     /* KVM plane state */
-    unsigned kvm_plane;                                    /* Current active plane */
-    struct KVMPlane *kvm_plane_state[KVM_MAX_PLANES]; /* Per-Plane state */
+    unsigned kvm_plane;
+    struct KVMPlane *kvm_plane_state[KVM_MAX_PLANES];
+    struct CPUState *kvm_plane_leader;
+    struct CPUState *kvm_plane_next;
+    struct CPUState *kvm_plane_active;
 
     /* Use by accel-block: CPU is executing an ioctl() */
     QemuLockCnt in_ioctl_lock;
@@ -603,6 +613,15 @@ static inline struct KVMPlane *cpu_active_kvm_plane(CPUState *s)
 	return s->kvm_plane_state[s->kvm_plane];
 }
 
+/*
+ * A plane > 0 vCPU, which borrows its leader's thread. Test this, not
+ * @kvm_plane: plane 0 is a valid plane number.
+ */
+static inline bool cpu_is_plane_sibling(CPUState *cpu)
+{
+    return cpu->kvm_plane_leader != NULL;
+}
+
 /* Validate placement of CPUNegativeOffsetState. */
 QEMU_BUILD_BUG_ON(offsetof(CPUState, neg) !=
                   sizeof(CPUState) - sizeof(CPUNegativeOffsetState));
@@ -635,6 +654,24 @@ extern CPUTailQ cpus_queue;
 #define first_cpu        QTAILQ_FIRST_RCU(&cpus_queue)
 #define CPU_NEXT(cpu)    QTAILQ_NEXT_RCU(cpu, node)
 #define CPU_FOREACH(cpu) QTAILQ_FOREACH_RCU(cpu, &cpus_queue, node)
+
+/* the next execution thread at or after @cpu, skipping plane > 0 vCPUs */
+static inline CPUState *cpu_thread_from(CPUState *cpu)
+{
+    while (cpu && cpu_is_plane_sibling(cpu)) {
+        cpu = CPU_NEXT(cpu);
+    }
+    return cpu;
+}
+
+/*
+ * Iterate the execution threads, i.e. every plane-0 vCPU. A thread-level
+ * operation (stop, resume) on a leader reaches all its planes; per-plane
+ * state needs plain CPU_FOREACH.
+ */
+#define CPU_FOREACH_THREAD(cpu)                                 \
+    for ((cpu) = cpu_thread_from(first_cpu); (cpu);             \
+         (cpu) = cpu_thread_from(CPU_NEXT(cpu)))
 #define CPU_FOREACH_SAFE(cpu, next_cpu) \
     QTAILQ_FOREACH_SAFE_RCU(cpu, &cpus_queue, node, next_cpu)
 

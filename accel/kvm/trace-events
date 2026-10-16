@@ -12,6 +12,8 @@ kvm_failed_reg_get(uint64_t id, const char *msg) "Warning: Unable to retrieve ON
 kvm_failed_reg_set(uint64_t id, const char *msg) "Warning: Unable to set ONEREG %" PRIu64 " to KVM: %s"
 kvm_init_vcpu(int cpu_index, unsigned long arch_cpu_id) "index: %d id: %lu"
 kvm_create_vcpu(int cpu_index, unsigned long arch_cpu_id, int kvm_fd) "index: %d, id: %lu, kvm fd: %d"
+kvm_init_plane_vcpu(int cpu_index, unsigned long arch_cpu_id, unsigned plane) "index: %d id: %lu plane: %u"
+kvm_plane_select(int cpu_index, unsigned plane) "index: %d runs plane %u"
 kvm_destroy_vcpu(int cpu_index, unsigned long arch_cpu_id) "index: %d id: %lu"
 kvm_park_vcpu(int cpu_index, unsigned long arch_cpu_id) "index: %d id: %lu"
 kvm_unpark_vcpu(unsigned long arch_cpu_id, const char *msg) "id: %lu %s"

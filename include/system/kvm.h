@@ -220,6 +220,22 @@ int kvm_vm_plane_ioctl(KVMState *s, unsigned plane_id, unsigned long type, ...);
 int kvm_get_or_create_plane_fd(KVMState *s, unsigned id);
 void kvm_create_vcpu_plane(CPUState *cpu, unsigned plane);
 
+/**
+ * kvm_plane_run_cpu - the CPUState the host thread of @leader runs next
+ *
+ * The leader itself, or the plane vCPU selected with kvm_plane_select().
+ */
+CPUState *kvm_plane_run_cpu(CPUState *leader);
+
+/**
+ * kvm_plane_select - make @cpu the CPUState its leader's thread runs next
+ *
+ * Called from that thread, outside KVM_RUN: the plane of @cpu becomes the
+ * one runnable plane of the vCPU (KVM_SET_PLANE_RUN_STATE) and the current
+ * kvm_cpu_exec() must return before the thread picks @cpu up.
+ */
+void kvm_plane_select(CPUState *cpu);
+
 void kvm_flush_coalesced_mmio_buffer(void);
 
 void kvm_irqchip_add_change_notifier(Notifier *n);

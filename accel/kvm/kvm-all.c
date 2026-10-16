@@ -453,6 +453,19 @@ static int kvm_rebind_vcpus(Error **errp)
     KVMState *s = kvm_state;
     int kvm_fd, ret = 0;
 
+    /*
+     * A plane vCPU came from KVM_CREATE_VCPU on its plane's fd, so the loop
+     * below would hand it a plane-0 vCPU from the VM fd. Refuse before the
+     * first vCPU is destroyed, because a partial rebind cannot be undone.
+     */
+    CPU_FOREACH(cpu) {
+        if (cpu_is_plane_sibling(cpu)) {
+            error_setg(errp, "kvm: cannot rebind vCPUs: CPU %d is on plane %d",
+                       cpu->cpu_index, cpu->kvm_plane);
+            return -EINVAL;
+        }
+    }
+
     CPU_FOREACH(cpu) {
         vcpu_id = kvm_arch_vcpu_id(cpu);
 
@@ -793,6 +806,144 @@ err:
     return ret;
 }
 
+/*
+ * A plane > 0 vCPU has the id of a plane-0 vCPU and shares its kvm_run page
+ * in the kernel, so it is created and driven only from the plane-0 vCPU's
+ * thread. Its CPUState borrows that thread and halt condition.
+ */
+int kvm_init_plane_vcpu(CPUState *cpu, Error **errp)
+{
+    CPUState *leader = cpu->kvm_plane_leader;
+    KVMState *s = kvm_state;
+    unsigned long vcpu_id = kvm_arch_vcpu_id(cpu);
+    unsigned plane = cpu->kvm_plane;
+    CPUState **tail;
+    int ret;
+
+    assert(leader && !cpu_is_plane_sibling(leader));
+    assert(plane > 0 && plane < KVM_MAX_PLANES);
+    assert(qemu_cpu_is_self(leader));
+    assert(vcpu_id == kvm_arch_vcpu_id(leader));
+
+    trace_kvm_init_plane_vcpu(cpu->cpu_index, vcpu_id, plane);
+
+    ret = kvm_get_or_create_plane_fd(s, plane);
+    if (ret < 0) {
+        error_setg_errno(errp, -ret, "kvm_init_plane_vcpu: KVM_CREATE_PLANE "
+                         "failed (plane %u)", plane);
+        return ret;
+    }
+    ret = kvm_vm_plane_ioctl(s, plane, KVM_CREATE_VCPU, vcpu_id);
+    if (ret < 0) {
+        error_setg_errno(errp, -ret, "kvm_init_plane_vcpu: KVM_CREATE_VCPU "
+                         "failed (%lu, plane %u)", vcpu_id, plane);
+        return ret;
+    }
+    kvm_create_vcpu_internal(cpu, s, ret);
+
+    /*
+     * The one vCPU fd of this CPUState: slot 0 for its own ioctls, and its
+     * plane number so that cpu_active_kvm_plane() finds the same state.
+     */
+    cpu->kvm_plane = plane;
+    cpu->kvm_plane_state[plane] = cpu_kvm_plane(cpu, 0);
+
+    cpu->kvm_run = leader->kvm_run;
+
+    if (s->kvm_dirty_ring_size) {
+        ret = map_kvm_dirty_gfns(s, cpu, errp);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    ret = kvm_arch_init_vcpu(cpu);
+    if (ret < 0) {
+        error_setg_errno(errp, -ret,
+                         "kvm_init_plane_vcpu: kvm_arch_init_vcpu failed (%lu)",
+                         vcpu_id);
+        return ret;
+    }
+    cpu_kvm_plane(cpu, 0)->kvm_vcpu_stats_fd =
+        kvm_vcpu_ioctl(cpu, KVM_GET_STATS_FD, NULL);
+
+    g_free(cpu->thread);
+    qemu_cond_destroy(cpu->halt_cond);
+    g_free(cpu->halt_cond);
+    cpu->thread = leader->thread;
+    cpu->thread_id = leader->thread_id;
+    cpu->halt_cond = leader->halt_cond;
+    cpu->kvm_plane_active = cpu;
+
+    /* readers walk the list without the BQL (hv_plane_vcpu()) */
+    for (tail = &leader->kvm_plane_next; *tail;
+         tail = &(*tail)->kvm_plane_next) {
+        assert((*tail)->kvm_plane != plane);
+    }
+    qatomic_rcu_set(tail, cpu);
+
+    return 0;
+}
+
+CPUState *kvm_plane_run_cpu(CPUState *leader)
+{
+    return leader->kvm_plane_active ? leader->kvm_plane_active : leader;
+}
+
+static void kvm_plane_set_run_state(CPUState *cpu, bool runnable)
+{
+    uint32_t state = runnable ? KVM_PLANE_RUN_STATE_RUNNABLE :
+                                KVM_PLANE_RUN_STATE_STOPPED;
+    int ret = kvm_vcpu_ioctl(cpu, KVM_SET_PLANE_RUN_STATE, &state);
+
+    if (ret < 0) {
+        error_report("kvm: KVM_SET_PLANE_RUN_STATE(%u) on CPU %d plane %d: %s",
+                     state, cpu->cpu_index, cpu->kvm_plane, strerror(-ret));
+    }
+}
+
+void kvm_plane_select(CPUState *cpu)
+{
+    CPUState *leader = cpu->kvm_plane_leader ? cpu->kvm_plane_leader : cpu;
+    CPUState *prev = kvm_plane_run_cpu(leader);
+    CPUState *p;
+
+    assert(qemu_cpu_is_self(leader));
+    trace_kvm_plane_select(leader->cpu_index, cpu->kvm_plane);
+    leader->kvm_plane_active = cpu;
+
+    /*
+     * The kernel runs the lowest runnable plane. Make the target runnable
+     * first so the vCPU never has no runnable plane, then stop every other
+     * plane; plane 0 must be stopped explicitly or its pending events make
+     * it runnable again on their own.
+     */
+    if (cpu != prev) {
+        kvm_plane_set_run_state(cpu, true);
+    }
+    for (p = leader; p; p = qatomic_rcu_read(&p->kvm_plane_next)) {
+        if (p != cpu && (p == prev || p == leader)) {
+            kvm_plane_set_run_state(p, false);
+        }
+    }
+}
+
+/* KVM_RUN goes to the leader's plane-0 fd; the run state selects the plane */
+static int kvm_vcpu_run(CPUState *cpu)
+{
+    CPUState *leader = cpu->kvm_plane_leader ? cpu->kvm_plane_leader : cpu;
+    int ret;
+
+    trace_kvm_vcpu_ioctl(cpu->cpu_index, KVM_RUN, NULL);
+    accel_cpu_ioctl_begin(cpu);
+    ret = ioctl(cpu_kvm_plane(leader, 0)->kvm_fd, KVM_RUN, 0);
+    accel_cpu_ioctl_end(cpu);
+    if (ret == -1) {
+        ret = -errno;
+    }
+    return ret;
+}
+
 void kvm_close(void)
 {
     CPUState *cpu;
@@ -808,6 +959,10 @@ void kvm_close(void)
             struct KVMPlane *plane;
             plane_id--;
             plane = cpu_kvm_plane(cpu, plane_id);
+            /* never created, or the alias of a plane > 0 CPUState's slot 0 */
+            if (!plane || plane->kvm_fd < 0) {
+                continue;
+            }
             close(plane->kvm_fd);
             plane->kvm_fd = -1;
             close(plane->kvm_vcpu_stats_fd);
@@ -3577,7 +3732,7 @@ int kvm_cpu_exec(CPUState *cpu)
             kvm_cpu_kick_self();
         }
 
-        run_ret = kvm_vcpu_ioctl(cpu, KVM_RUN, 0);
+        run_ret = kvm_vcpu_run(cpu);
 
         /*
          * After writing cpu->exit_request, cpu_exit() sends a signal that writes

@@ -86,12 +86,30 @@ bool cpu_work_list_empty(CPUState *cpu)
     return QSIMPLEQ_EMPTY_ATOMIC(&cpu->work_list);
 }
 
+/* a plane > 0 vCPU's stop request or queued work is handled by its leader */
+static bool cpu_plane_events_pending(CPUState *leader)
+{
+    CPUState *cpu;
+
+    for (cpu = leader->kvm_plane_next; cpu; cpu = cpu->kvm_plane_next) {
+        if (cpu->stop || !cpu_work_list_empty(cpu)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool cpu_thread_is_idle(CPUState *cpu)
 {
-    if (cpu->stop || !cpu_work_list_empty(cpu)) {
+    if (cpu->stop || !cpu_work_list_empty(cpu) ||
+        cpu_plane_events_pending(cpu)) {
         return false;
     }
     if (cpu_is_stopped(cpu)) {
+        return true;
+    }
+    /* the thread runs the selected plane, so that plane's state decides */
+    if (cpu->kvm_plane_active && cpu_is_stopped(cpu->kvm_plane_active)) {
         return true;
     }
     if (!cpu->halted || cpu_has_work(cpu)) {
@@ -454,11 +472,22 @@ static void qemu_cpu_stop(CPUState *cpu, bool exit)
 
 void qemu_process_cpu_events_common(CPUState *cpu)
 {
+    CPUState *plane;
+
     qatomic_set_mb(&cpu->thread_kicked, false);
     if (cpu->stop) {
         qemu_cpu_stop(cpu, false);
     }
     process_queued_cpu_work(cpu);
+
+    for (plane = cpu->kvm_plane_next; plane; plane = plane->kvm_plane_next) {
+        qatomic_set_mb(&plane->thread_kicked, false);
+        qatomic_set(&plane->exit_request, false);
+        if (plane->stop) {
+            qemu_cpu_stop(plane, false);
+        }
+        process_queued_cpu_work(plane);
+    }
 }
 
 void qemu_process_cpu_events(CPUState *cpu)
@@ -633,7 +662,7 @@ static bool all_vcpus_paused(void)
 {
     CPUState *cpu;
 
-    CPU_FOREACH(cpu) {
+    CPU_FOREACH_THREAD(cpu) {
         if (!cpu->stopped) {
             return false;
         }
@@ -647,7 +676,7 @@ void pause_all_vcpus(void)
     CPUState *cpu;
 
     qemu_clock_enable(QEMU_CLOCK_VIRTUAL, false);
-    CPU_FOREACH(cpu) {
+    CPU_FOREACH_THREAD(cpu) {
         cpu_pause(cpu);
     }
 
@@ -659,7 +688,7 @@ void pause_all_vcpus(void)
     while (!all_vcpus_paused()) {
         qemu_cond_wait(&qemu_pause_cond, &bql);
         /* FIXME: is this needed? */
-        CPU_FOREACH(cpu) {
+        CPU_FOREACH_THREAD(cpu) {
             qemu_cpu_kick(cpu);
         }
     }
@@ -678,7 +707,7 @@ void resume_all_vcpus(void)
     }
 
     qemu_clock_enable(QEMU_CLOCK_VIRTUAL, true);
-    CPU_FOREACH(cpu) {
+    CPU_FOREACH_THREAD(cpu) {
         cpu_resume(cpu);
     }
 }

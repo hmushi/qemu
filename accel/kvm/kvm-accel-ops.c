@@ -48,12 +48,18 @@ static void *kvm_vcpu_thread_fn(void *arg)
     qemu_guest_random_seed_thread_part2(cpu->random_seed);
 
     do {
+        CPUState *run_cpu;
+
         qemu_process_cpu_events(cpu);
 
-        if (cpu_can_run(cpu)) {
-            r = kvm_cpu_exec(cpu);
+        /* a plane > 0 vCPU of this thread may have been selected to run */
+        run_cpu = kvm_plane_run_cpu(cpu);
+        if (cpu_can_run(run_cpu)) {
+            current_cpu = run_cpu;
+            r = kvm_cpu_exec(run_cpu);
+            current_cpu = cpu;
             if (r == EXCP_DEBUG) {
-                cpu_handle_guest_debug(cpu);
+                cpu_handle_guest_debug(run_cpu);
             }
         }
     } while (!cpu->unplug || cpu_can_run(cpu));
@@ -65,9 +71,24 @@ static void *kvm_vcpu_thread_fn(void *arg)
     return NULL;
 }
 
+static void kvm_plane_vcpu_init_work(CPUState *leader, run_on_cpu_data arg)
+{
+    CPUState *cpu = arg.host_ptr;
+
+    kvm_init_plane_vcpu(cpu, &error_fatal);
+    cpu_thread_signal_created(cpu);
+}
+
 static void kvm_start_vcpu_thread(CPUState *cpu)
 {
     char thread_name[VCPU_THREAD_NAME_SIZE];
+
+    /* a plane > 0 vCPU is created on, and run by, its leader's thread */
+    if (cpu_is_plane_sibling(cpu)) {
+        run_on_cpu(cpu->kvm_plane_leader, kvm_plane_vcpu_init_work,
+                   RUN_ON_CPU_HOST_PTR(cpu));
+        return;
+    }
 
     snprintf(thread_name, VCPU_THREAD_NAME_SIZE, "CPU %d/KVM",
              cpu->cpu_index);
