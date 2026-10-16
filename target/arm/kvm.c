@@ -1594,6 +1594,60 @@ static bool kvm_arm_handle_debug(ARMCPU *cpu,
     return false;
 }
 
+/*
+ * HvCallStartVirtualProcessor input for ARM64 (hvdef StartVirtualProcessorArm64
+ * and InitialVpContextArm64): 16-byte header, then nine registers.
+ */
+struct hv_start_vp_arm64 {
+    uint64_t partition_id;
+    uint32_t vp_index;
+    uint8_t target_vtl;
+    uint8_t rsvd0;
+    uint16_t rsvd1;
+    uint64_t pc;
+    uint64_t sp_elh;
+    uint64_t sctlr_el1;
+    uint64_t mair_el1;
+    uint64_t tcr_el1;
+    uint64_t vbar_el1;
+    uint64_t ttbr0_el1;
+    uint64_t ttbr1_el1;
+    uint64_t x18;
+};
+
+typedef struct HvVpStartWork {
+    struct hv_start_vp_arm64 in;
+} HvVpStartWork;
+
+/* On the target's own thread: load the supplied context and run it at EL1h. */
+static void hv_vp_start_work(CPUState *cs, run_on_cpu_data arg)
+{
+    HvVpStartWork *w = arg.host_ptr;
+    ARMCPU *cpu = ARM_CPU(cs);
+    CPUARMState *env = &cpu->env;
+
+    cpu_synchronize_state(cs);
+
+    memset(env->xregs, 0, sizeof(env->xregs));
+    env->xregs[18] = w->in.x18;
+    env->pc = w->in.pc;
+    env->sp_el[1] = w->in.sp_elh;
+    env->xregs[31] = w->in.sp_elh;
+    env->cp15.sctlr_el[1] = w->in.sctlr_el1;
+    env->cp15.mair_el[1] = w->in.mair_el1;
+    env->cp15.tcr_el[1] = w->in.tcr_el1;
+    env->cp15.vbar_el[1] = w->in.vbar_el1;
+    env->cp15.ttbr0_el[1] = w->in.ttbr0_el1;
+    env->cp15.ttbr1_el[1] = w->in.ttbr1_el1;
+    pstate_write(env, PSTATE_MODE_EL1h | PSTATE_DAIF);
+    env->aarch64 = 1;
+
+    arm_set_cpu_power_state(cpu, PSCI_ON);
+    cs->halted = 0;
+    cs->vcpu_dirty = true;
+    g_free(w);
+}
+
 /* Identity-class registers Windows writes about itself and reads back. */
 struct hv_identity_reg { uint32_t name; uint64_t val; };
 static uint64_t hv_crash_regs[5]; /* GUEST_CRASH_P0..P4 */
@@ -1913,6 +1967,47 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
                 } else {
                     status = HV_STATUS_INVALID_PARAMETER;
                 }
+            }
+        }
+    } else if (code == 0x0099) { /* HvCallStartVirtualProcessor, memory form */
+        struct hv_start_vp_arm64 in;
+        CPUState *target;
+
+        status = HV_STATUS_INVALID_HYPERCALL_INPUT;
+        if (!fast && !reps && in_gpa &&
+            address_space_read(&address_space_memory, in_gpa,
+                               MEMTXATTRS_UNSPECIFIED, &in,
+                               sizeof(in)) == MEMTX_OK) {
+            if (in.partition_id != HV_PARTITION_ID_SELF) {
+                status = HV_STATUS_INVALID_PARTITION_ID;
+            } else if (in.target_vtl != 0) {
+                /* no VSM core yet: a higher VTL has nothing to run */
+                qemu_log_mask(LOG_UNIMP, "hyperv: StartVirtualProcessor to "
+                              "VTL %u refused\n", in.target_vtl);
+                status = HV_STATUS_INVALID_PARAMETER;
+            } else if (in.vp_index == HV_ANY_VP ||
+                       in.vp_index == HV_VP_INDEX_SELF ||
+                       !(target = qemu_get_cpu(in.vp_index))) {
+                status = HV_STATUS_INVALID_VP_INDEX;
+            } else {
+                HvVpStartWork *w;
+
+                bql_lock();
+                if (ARM_CPU(target)->power_state != PSCI_OFF ||
+                    target == cs) {
+                    status = HV_STATUS_INVALID_VP_STATE;
+                } else {
+                    w = g_new(HvVpStartWork, 1);
+                    w->in = in;
+                    /* claim the processor now so a second start is refused */
+                    arm_set_cpu_power_state(ARM_CPU(target), PSCI_ON);
+                    async_run_on_cpu(target, hv_vp_start_work,
+                                     RUN_ON_CPU_HOST_PTR(w));
+                    trace_kvm_arm_hv_start_vp(in.vp_index, in.pc, in.sp_elh,
+                                              in.ttbr1_el1);
+                    status = HV_STATUS_SUCCESS;
+                }
+                bql_unlock();
             }
         }
     } else if (code == 0x006f) {
