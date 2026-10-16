@@ -21,11 +21,21 @@
 #define HV_STATUS_INVALID_ALIGNMENT           4
 #define HV_STATUS_INVALID_PARAMETER           5
 #define HV_STATUS_INSUFFICIENT_MEMORY         11
+#define HV_STATUS_INVALID_PARTITION_ID        13
+#define HV_STATUS_INVALID_VP_INDEX            14
+#define HV_STATUS_INVALID_VP_STATE            21
 #define HV_STATUS_INVALID_PORT_ID             17
 #define HV_STATUS_INVALID_CONNECTION_ID       18
 #define HV_STATUS_INSUFFICIENT_BUFFERS        19
 #define HV_STATUS_NOT_ACKNOWLEDGED            20
 #define HV_STATUS_NO_DATA                     27
+
+/*
+ * Partition and VP self-identifiers
+ */
+#define HV_PARTITION_ID_SELF                  0xffffffffffffffffULL
+#define HV_VP_INDEX_SELF                      0xfffffffeU
+#define HV_ANY_VP                             0xffffffffU
 
 /*
  * Hypercall numbers
@@ -132,6 +142,24 @@ struct hyperv_message {
 struct hyperv_message_page {
     struct hyperv_message slot[HV_SINT_COUNT];
 };
+
+/*
+ * Put @msg in a SynIC message slot (TLFS 11.9). A slot the guest has not
+ * emptied is never overwritten: it is flagged pending so the guest's EOM
+ * reports it, and @msg stays with the caller.
+ *
+ * Returns 0 once @msg is in the slot, or -EAGAIN if the slot was busy.
+ */
+static inline int hv_msg_slot_post(struct hyperv_message *slot,
+                                   const struct hyperv_message *msg)
+{
+    if (slot->header.message_type != HV_MESSAGE_NONE) {
+        slot->header.message_flags |= HV_MESSAGE_FLAG_PENDING;
+        return -EAGAIN;
+    }
+    *slot = *msg;
+    return 0;
+}
 
 /*
  * SynIC event flags structures
