@@ -2041,6 +2041,53 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
                           " refused\n", prop, fast ? "fast" : "memory");
             status = HV_STATUS_INVALID_PARAMETER;
         }
+    } else if (code == 0x00aa) {
+        /*
+         * HvlGetDeviceCapabilities. Input: device id (type 0x40 = PCI, segment,
+         * BDF) + 16 zero bytes; output 16 bytes, kernel reads bit 7 of word 0
+         * (domain transition). No device domains here: all zero.
+         */
+        struct { uint16_t bdf; uint16_t segment; uint16_t rsvd; uint16_t type; }
+            id = {0};
+        uint8_t caps[16] = {0};
+
+        status = HV_STATUS_INVALID_HYPERCALL_INPUT;
+        if (!fast && in_gpa && out_gpa &&
+            address_space_read(&address_space_memory, in_gpa,
+                               MEMTXATTRS_UNSPECIFIED, &id,
+                               sizeof(id)) == MEMTX_OK) {
+            address_space_write(&address_space_memory, out_gpa,
+                                MEMTXATTRS_UNSPECIFIED, caps, sizeof(caps));
+            info_report("hyperv: device %04x:%02x:%02x.%u asked for"
+                        " hypervisor capabilities: none", id.segment,
+                        id.bdf >> 8, (id.bdf >> 3) & 0x1f, id.bdf & 7);
+            status = HV_STATUS_SUCCESS;
+        }
+    } else if (code == 0x0108 || code == 0x0109) {
+        /*
+         * HvlMapDmaRanges / HvlUnmapDmaRanges. Each 16-byte element is a guest
+         * page frame and count. No device domain or DMA remapping here, so the
+         * ranges are already reachable: accept and complete every rep.
+         */
+        status = HV_STATUS_INVALID_HYPERCALL_INPUT;
+        if (!fast && in_gpa && reps) {
+            static bool mapped, unmapped;
+            bool *seen = (code == 0x0108) ? &mapped : &unmapped;
+
+            if (!*seen) {
+                uint64_t elem[2] = {0};
+                address_space_read(&address_space_memory, in_gpa,
+                                   MEMTXATTRS_UNSPECIFIED, elem, sizeof(elem));
+                info_report("hyperv: %s %u device DMA range(s); first"
+                            " element pfn 0x%" PRIx64 " pages %u"
+                            " (raw 0x%016" PRIx64 " 0x%016" PRIx64 ")",
+                            code == 0x0108 ? "map" : "unmap", reps,
+                            elem[0], (uint32_t)elem[1], elem[0], elem[1]);
+                *seen = true;
+            }
+            reps_completed = reps;
+            status = HV_STATUS_SUCCESS;
+        }
     } else if (code == 0x0046) {
         /*
          * HvCallGetPartitionId: sole root partition, so id 1. Output u64 at
