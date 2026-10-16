@@ -484,6 +484,8 @@ void kvm_init_cpu_signals(CPUState *cpu);
 int kvm_irqchip_add_msi_route(AccelRouteChange *c, int vector, PCIDevice *dev);
 int kvm_irqchip_update_msi_route(KVMState *s, int virq, MSIMessage msg,
                                  PCIDevice *dev);
+/* an MSI the interrupt controller translates for @devid (GIC ITS) */
+int kvm_irqchip_send_msi_devid(KVMState *s, MSIMessage msg, uint32_t devid);
 void kvm_irqchip_commit_routes(KVMState *s);
 
 int kvm_irqchip_get_virq(KVMState *s);

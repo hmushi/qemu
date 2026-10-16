@@ -63,6 +63,11 @@ int kvm_irqchip_update_msi_route(KVMState *s, int virq, MSIMessage msg,
     return -ENOSYS;
 }
 
+int kvm_irqchip_send_msi_devid(KVMState *s, MSIMessage msg, uint32_t devid)
+{
+    return -ENOSYS;
+}
+
 void kvm_irqchip_commit_routes(KVMState *s)
 {
 }

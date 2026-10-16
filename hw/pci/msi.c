@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "system/kvm.h"
 #include "hw/pci/msi.h"
 #include "hw/xen/xen.h"
 #include "qemu/range.h"
@@ -380,6 +381,17 @@ void msi_notify(PCIDevice *dev, unsigned int vector)
 
 void msi_send_message(PCIDevice *dev, MSIMessage msg)
 {
+    /*
+     * A Hyper-V root-partition guest leaves the MSI address at 0 and expects
+     * delivery by device id, with the data as the ITS event id. Send it to
+     * the virt machine's GITS_TRANSLATER with the requester id.
+     */
+    if (msg.address == 0 && kvm_irqchip_in_kernel()) {
+        MSIMessage m2 = { .address = 0x08090040ULL, .data = msg.data };
+
+        kvm_irqchip_send_msi_devid(kvm_state, m2, pci_requester_id(dev));
+        return;
+    }
     dev->msi_trigger(dev, msg);
 }
 
