@@ -97,6 +97,7 @@ enum {
     VIRT_NVDIMM_ACPI,
     VIRT_PVTIME,
     VIRT_ACPI_PCIHP,
+    VIRT_HV_OVERLAY,
     VIRT_GWDT_WS0,
     VIRT_GWDT_REFRESH,
     VIRT_GWDT_CONTROL,
@@ -262,7 +263,18 @@ static inline int virt_gicv3_redist_region_count(VirtMachineState *vms)
             vms->highmem_redists) ? 2 : 1;
 }
 
+/*
+ * Hyper-V partition information page: one zero page the machine owns and
+ * publishes to a Windows guest through VP register 0x90015. Returns the
+ * fixed GPA, or 0 when the machine did not create it.
+ */
+hwaddr virt_hv_overlay_base(void);
 /* hv-identity: does the FADT name Hyper-V, so the guest makes its hypercalls */
 bool virt_hv_identity(void);
+/*
+ * Alias the same page at gpa, or unmap the alias when map is false.
+ * Returns false when gpa lies beyond the guest physical address space.
+ */
+bool virt_hv_overlay_alias(hwaddr gpa, bool map);
 
 #endif /* QEMU_ARM_VIRT_H */

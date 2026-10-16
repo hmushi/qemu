@@ -214,6 +214,7 @@ static const MemMapEntry base_memmap[] = {
     [VIRT_ACPI_PCIHP] =         { 0x090c0000, ACPI_PCIHP_SIZE },
     /* QEMU-owned ITS tables, see hw/intc/arm_gicv3_its_kvm.h; not advertised */
     [VIRT_ITS_KVM_TABLES] =     { 0x09100000, 0x00800000 },
+    [VIRT_HV_OVERLAY] =         { 0x090d0000, 0x00001000 },
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
@@ -1574,12 +1575,70 @@ static void create_uart(const VirtMachineState *vms, int uart,
     g_free(nodename);
 }
 
+static MemoryRegion *hv_overlay_page;
+static MemoryRegion *hv_overlay_alias;
+static hwaddr hv_overlay_gpa;
+static hwaddr hv_overlay_highest_gpa;
+
+hwaddr virt_hv_overlay_base(void)
+{
+    return hv_overlay_gpa;
+}
+
 bool virt_hv_identity(void)
 {
     Object *ms = qdev_get_machine();
 
     return object_dynamic_cast(ms, TYPE_VIRT_MACHINE) &&
            VIRT_MACHINE(ms)->hv_identity;
+}
+
+bool virt_hv_overlay_alias(hwaddr gpa, bool map)
+{
+    MemoryRegion *sysmem = get_system_memory();
+
+    if (!hv_overlay_page) {
+        return false;
+    }
+    /*
+     * The guest publishes the address with the upper bits of a kernel VA
+     * set (0xfffff8...). Only the low 48 bits can name a physical page.
+     */
+    gpa &= (1ULL << 48) - 1;
+    if (map && gpa > hv_overlay_highest_gpa) {
+        return false;
+    }
+    if (hv_overlay_alias) {
+        memory_region_del_subregion(sysmem, hv_overlay_alias);
+        object_unparent(OBJECT(hv_overlay_alias));
+        hv_overlay_alias = NULL;
+    }
+    if (map && gpa != hv_overlay_gpa) {
+        hv_overlay_alias = g_new0(MemoryRegion, 1);
+        memory_region_init_alias(hv_overlay_alias, NULL, "hv-overlay-alias",
+                                 hv_overlay_page, 0,
+                                 memory_region_size(hv_overlay_page));
+        memory_region_add_subregion_overlap(sysmem, gpa, hv_overlay_alias, 1);
+    }
+    return true;
+}
+
+/*
+ * One zero-filled RAM page at a fixed GPA, published to a Windows guest as
+ * its Hyper-V partition information page (VP register 0x90015).
+ */
+static void create_hv_overlay(const VirtMachineState *vms, MemoryRegion *mem)
+{
+    hwaddr base = vms->memmap[VIRT_HV_OVERLAY].base;
+
+    hv_overlay_page = g_new0(MemoryRegion, 1);
+    memory_region_init_ram(hv_overlay_page, NULL, "hv-overlay",
+                           vms->memmap[VIRT_HV_OVERLAY].size, &error_fatal);
+    memory_region_add_subregion(mem, base, hv_overlay_page);
+    hv_overlay_gpa = base;
+    /* bounded by the guest physical address space, not the memmap */
+    hv_overlay_highest_gpa = vms->ipa_size ?
+        (1ULL << vms->ipa_size) - 1 : vms->highest_gpa;
 }
 
 static void create_rtc(const VirtMachineState *vms)
@@ -3237,6 +3296,10 @@ static void machvirt_init(MachineState *machine)
     vms->highmem_ecam &= (!firmware_loaded || aarch64);
 
     create_rtc(vms);
+
+    if (kvm_enabled()) {
+        create_hv_overlay(vms, sysmem);
+    }
 
     create_pcie(vms);
     create_cxl_host_reg_region(vms);
