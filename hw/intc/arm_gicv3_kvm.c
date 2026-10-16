@@ -24,6 +24,7 @@
 #include "hw/intc/arm_gicv3_common.h"
 #include "hw/arm/virt.h"
 #include "qemu/error-report.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/module.h"
 #include "system/kvm.h"
 #include "system/runstate.h"
@@ -876,6 +877,21 @@ static void kvm_arm_gicv3_realize(DeviceState *dev, Error **errp)
     kvm_device_access(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
                       0, &s->num_irq, true, &error_abort);
 
+    /* GICD_TYPER.SecurityExtn for the guest; must precede the init below */
+    if (s->kvm_security_extn) {
+        if (!kvm_device_check_attr(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_CTRL,
+                                   KVM_DEV_ARM_VGIC_CTRL_SECURITY_EXTN)) {
+            error_setg(errp, "VGICv3 two security states are not supported "
+                       "by this host kernel");
+            return;
+        }
+        kvm_device_access(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_CTRL,
+                          KVM_DEV_ARM_VGIC_CTRL_SECURITY_EXTN, NULL, true,
+                          &error_abort);
+        /* no secure firmware groups the interrupts; reset does, as KVM does */
+        s->irq_reset_nonsecure = true;
+    }
+
     /* Tell the kernel to complete VGIC initialization now */
     kvm_device_access(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_CTRL,
                       KVM_DEV_ARM_VGIC_CTRL_INIT, NULL, true, &error_abort);
@@ -948,6 +964,10 @@ static void kvm_arm_gicv3_realize(DeviceState *dev, Error **errp)
     }
 }
 
+static const Property kvm_arm_gicv3_props[] = {
+    DEFINE_PROP_BOOL("kvm-security-extn", GICv3State, kvm_security_extn, false),
+};
+
 static void kvm_arm_gicv3_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -955,6 +975,7 @@ static void kvm_arm_gicv3_class_init(ObjectClass *klass, const void *data)
     ARMGICv3CommonClass *agcc = ARM_GICV3_COMMON_CLASS(klass);
     KVMARMGICv3Class *kgc = KVM_ARM_GICV3_CLASS(klass);
 
+    device_class_set_props(dc, kvm_arm_gicv3_props);
     agcc->pre_save = kvm_arm_gicv3_get;
     agcc->post_load = kvm_arm_gicv3_put;
     device_class_set_parent_realize(dc, kvm_arm_gicv3_realize,

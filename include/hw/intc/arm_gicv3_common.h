@@ -240,6 +240,8 @@ struct GICv3State {
     bool lpi_enable;
     bool nmi_support;
     bool security_extn;
+    /* KVM: report GICD_TYPER.SecurityExtn to the guest */
+    bool kvm_security_extn;
     bool force_8bit_prio;
     bool irq_reset_nonsecure;
     bool gicd_no_migration_shift_bug;
