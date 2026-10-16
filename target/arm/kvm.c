@@ -1600,6 +1600,7 @@ static uint64_t hv_crash_regs[5]; /* GUEST_CRASH_P0..P4 */
 static struct hv_identity_reg hv_identity_regs[] = {
     { 0x90002, 0 }, /* GUEST_OS_ID */
     { 0x90007, 0 }, /* CPU_MANAGEMENT_VERSION */
+    { 0x90017, 0 }, /* VP-info group member */
     { 0x40400, 0 }, /* SyntheticVbarEl1 */
     /* HvlConfigureMemoryZeroingOnReset; a reset policy nothing here acts on */
     { 0x270, 0 },
@@ -1688,6 +1689,14 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
         if (name == 0x90003) { /* VP_INDEX */
             lo = hyperv_vp_index(cs);
             status = HV_STATUS_SUCCESS;
+        } else if (name == 0x90004) {
+            /* TIME_REF_COUNT: 100 ns units */
+            uint64_t cnt = 0, cntfrq = ARM_CPU(cs)->gt_cntfrq_hz;
+
+            kvm_get_one_reg(cs, KVM_REG_ARM_TIMER_CNT, &cnt);
+            lo = cntfrq ? (uint64_t)(((__uint128_t)cnt * 10000000ULL) / cntfrq)
+                        : qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 100;
+            status = HV_STATUS_SUCCESS;
         } else if (name == 0x100) { /* HYPERVISOR_VERSION */
             lo = ((uint64_t)0x000A0000 << 32) | 0x3839; /* 10.0 build 14393 */
             hi = 0;                                      /* sp / sb / sn = 0 */
@@ -1745,6 +1754,30 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
             status = HV_STATUS_SUCCESS;
         } else if (name == 0x215) { /* GUEST_CRASH_CTL notify */
             status = HV_STATUS_SUCCESS;
+        } else if (name == 0x90017) {
+            /*
+             * HvRegisterReferenceTsc: populate the reference TSC page so the
+             * guest reads time from CNTVCT instead of the slow TimeRefCount
+             * hypercall. Page: {u32 seq; u32 rsvd; u64 scale; s64 offset}.
+             */
+            hwaddr gpa = x[5] & ~(hwaddr)0xfff;
+            r->val = x[5];
+            status = HV_STATUS_SUCCESS;
+            if (x[5] & 1) {
+                uint64_t cntfrq = ARM_CPU(cs)->gt_cntfrq_hz;
+                if (cntfrq) {
+                    uint8_t pg[40] = {0};
+                    uint32_t seq = 1;
+                    uint64_t scale = (uint64_t)(((__uint128_t)10000000ULL << 64) / cntfrq);
+                    /* reference time is the VM-wide counter itself */
+                    int64_t offset = 0;
+                    memcpy(pg + 0, &seq, 4);
+                    memcpy(pg + 8, &scale, 8);
+                    memcpy(pg + 16, &offset, 8);
+                    address_space_write(&address_space_memory, gpa,
+                                        MEMTXATTRS_UNSPECIFIED, pg, sizeof(pg));
+                }
+            }
         } else if (r) {
             if (name == 0x270 && !r->val) {
                 info_report("hyperv: memory zeroing on reset policy 0x%"
