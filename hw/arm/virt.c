@@ -3636,6 +3636,22 @@ static void virt_set_its_kvm_program(Object *obj, bool value, Error **errp)
     vms->its_kvm_program = value;
 }
 
+static void virt_get_ipa_size(Object *obj, Visitor *v, const char *name,
+                              void *opaque, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    visit_type_uint32(v, name, &vms->ipa_size, errp);
+}
+
+static void virt_set_ipa_size(Object *obj, Visitor *v, const char *name,
+                              void *opaque, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    visit_type_uint32(v, name, &vms->ipa_size, errp);
+}
+
 static bool virt_get_ras(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -4119,6 +4135,25 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
                      requested_pa_size, max_vm_pa_size);
         return -1;
     }
+
+    /* An explicit ipa-size only ever widens the guest physical space */
+    if (vms->ipa_size) {
+        if (fixed_ipa) {
+            error_report("ipa-size is not supported by this host kernel");
+            return -1;
+        }
+        if (vms->ipa_size > max_vm_pa_size) {
+            error_report("ipa-size=%u exceeds the IPA range supported by the "
+                         "host (%d bits)", vms->ipa_size, max_vm_pa_size);
+            return -1;
+        }
+        if (vms->ipa_size < requested_pa_size) {
+            error_report("ipa-size=%u is too small for the memory map "
+                         "(%d bits needed)", vms->ipa_size, requested_pa_size);
+            return -1;
+        }
+        requested_pa_size = vms->ipa_size;
+    }
     /*
      * We return the requested PA log size, unless KVM only supports
      * the implicit legacy 40b IPA setting, in which case the kvm_type
@@ -4362,6 +4397,14 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "KVM ITS for a guest that does not "
                                           "drive it, such as Windows under "
                                           "a Hyper-V identity");
+
+    object_class_property_add(oc, "ipa-size", "uint32", virt_get_ipa_size,
+                              virt_set_ipa_size, NULL, NULL);
+    object_class_property_set_description(oc, "ipa-size",
+                                          "Guest physical address size in "
+                                          "bits to request from KVM (default: "
+                                          "the smallest covering the memory "
+                                          "map)");
 
     object_class_property_add_bool(oc, "ras", virt_get_ras,
                                    virt_set_ras);

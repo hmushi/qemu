@@ -176,6 +176,7 @@ struct VirtMachineState {
     bool tcg_its;
     bool virt;
     bool ras;
+    uint32_t ipa_size;
     bool gic_security_extn;
     bool its_kvm_program;
     bool mte;
