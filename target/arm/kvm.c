@@ -1594,6 +1594,65 @@ static bool kvm_arm_handle_debug(ARMCPU *cpu,
     return false;
 }
 
+/* Identity-class registers Windows writes about itself and reads back. */
+struct hv_identity_reg { uint32_t name; uint64_t val; };
+static uint64_t hv_crash_regs[5]; /* GUEST_CRASH_P0..P4 */
+static struct hv_identity_reg hv_identity_regs[] = {
+    { 0x90002, 0 }, /* GUEST_OS_ID */
+    { 0x90007, 0 }, /* CPU_MANAGEMENT_VERSION */
+    { 0x40400, 0 }, /* SyntheticVbarEl1 */
+    /* HvlConfigureMemoryZeroingOnReset; a reset policy nothing here acts on */
+    { 0x270, 0 },
+};
+
+static struct hv_identity_reg *hv_identity_reg_find(uint32_t name)
+{
+    size_t i;
+    for (i = 0; i < ARRAY_SIZE(hv_identity_regs); i++) {
+        if (hv_identity_regs[i].name == name) {
+            return &hv_identity_regs[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Fast HVC #1 output is right-anchored at x16, not left-anchored as in the
+ * TLFS: the Windows call stub stores M output pairs through the tail of an
+ * stp ladder ending at x15/x16, so pair 0 lands in x(17 - 2M). x17 is the
+ * stub's scratch.
+ */
+#define HV_ARM_FAST_OUT_PAIRS_MAX 8
+
+/* First register of output pair 0, or 0 if @pairs does not fit x1 to x16. */
+static inline unsigned hv_arm_fast_out_first(unsigned pairs)
+{
+    if (pairs == 0 || pairs > HV_ARM_FAST_OUT_PAIRS_MAX) {
+        return 0;
+    }
+    return 17 - 2 * pairs;
+}
+
+/*
+ * Write @pairs output pairs from @val into @xregs, pair 0 first. Registers
+ * outside the window keep their values, as the TLFS volatile-register rule
+ * requires. Returns false and writes nothing if the pairs do not fit.
+ */
+static inline bool hv_arm_fast_out(uint64_t *xregs, const uint64_t *val,
+                                   unsigned pairs)
+{
+    unsigned first = hv_arm_fast_out_first(pairs);
+    unsigned i;
+
+    if (first == 0) {
+        return false;
+    }
+    for (i = 0; i < pairs * 2; i++) {
+        xregs[first + i] = val[i];
+    }
+    return true;
+}
+
 /*
  * Answer the VP-register hypercalls a Windows guest issues on the FADT
  * Hyper-V path: register name in x3 low, Set value in x5. x0 =
@@ -1604,7 +1663,8 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
     CPUARMState *env = &ARM_CPU(cs)->env;
     uint64_t x[8];
     uint16_t code;
-    uint64_t status = HV_STATUS_INVALID_HYPERCALL_CODE;
+    uint32_t name;
+    uint64_t lo = 0, hi = 0, status = HV_STATUS_INVALID_HYPERCALL_CODE;
     uint64_t reps_completed = 1;
     uint16_t reps;
     int i;
@@ -1614,12 +1674,86 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
         x[i] = env->xregs[i];
     }
     code = x[0] & 0xffff;
+    name = (uint32_t)x[3];
     /*
      * Control word: bit 16 selects the fast (register) form, bits 32-43 the
      * rep count. In the memory form x1 and x2 are the input and output
      * block addresses.
      */
     reps = (x[0] >> 32) & 0xfff;
+
+    if (code == 0x0050) { /* HvGetVpRegisters */
+        struct hv_identity_reg *r;
+        status = HV_STATUS_INVALID_PARAMETER; /* known call, unknown register */
+        if (name == 0x90003) { /* VP_INDEX */
+            lo = hyperv_vp_index(cs);
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x100) { /* HYPERVISOR_VERSION */
+            lo = ((uint64_t)0x000A0000 << 32) | 0x3839; /* 10.0 build 14393 */
+            hi = 0;                                      /* sp / sb / sn = 0 */
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x90006) { /* hypervisor interface id "Hv#1" */
+            lo = 0x31237648;
+            hi = 0;
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x215) { /* GUEST_CRASH_CTL: notify available */
+            lo = (1ULL << 63);
+            status = HV_STATUS_SUCCESS;
+        } else if (name >= 0x210 && name <= 0x214) { /* GUEST_CRASH_P0..P4 */
+            lo = hv_crash_regs[name - 0x210];
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x201) {
+            lo = (1ULL << 5); /* FEATURES_INFO: RelaxedTiming only */
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x202) {
+            /* IMPLEMENTATION_LIMITS: max VPs, max LPs */
+            uint32_t ncpu = current_machine ? current_machine->smp.max_cpus : 0;
+            lo = ((uint64_t)ncpu << 32) | ncpu;
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x204) {
+            /* CpuManagementFeaturesInfo bit 31 = root partition (sole owner) */
+            lo = (1ULL << 31);
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x200) {
+            /*
+             * PrivilegesAndFeaturesInfo mask; upper half is CPUID leaf 3 EBX
+             * (HV_PARTITION_PRIVILEGE_MASK).
+             */
+            lo = 0;
+            status = HV_STATUS_SUCCESS;
+        } else if (name >= 0x201 && name <= 0x20f) {
+            status = HV_STATUS_SUCCESS; /* feature-access leaf: honest zero */
+        } else if (name == 0x40001) { /* HvArm64RegisterName MpidrEl1 */
+            lo = ARM_CPU(cs)->mp_affinity | (1ULL << 31);
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x90007) {
+            /*
+             * CpuManagementVersion: bit 62 = version present. Gates the HAL
+             * reading 0x204.
+             */
+            lo = (1ULL << 62);
+            status = HV_STATUS_SUCCESS;
+        } else if ((r = hv_identity_reg_find(name)) != NULL) {
+            lo = r->val;
+            status = HV_STATUS_SUCCESS;
+        }
+    } else if (code == 0x0051) { /* HvSetVpRegisters */
+        struct hv_identity_reg *r = hv_identity_reg_find(name);
+        status = HV_STATUS_INVALID_PARAMETER; /* known call, unknown register */
+        if (name >= 0x210 && name <= 0x214) { /* store crash params */
+            hv_crash_regs[name - 0x210] = x[5];
+            status = HV_STATUS_SUCCESS;
+        } else if (name == 0x215) { /* GUEST_CRASH_CTL notify */
+            status = HV_STATUS_SUCCESS;
+        } else if (r) {
+            if (name == 0x270 && !r->val) {
+                info_report("hyperv: memory zeroing on reset policy 0x%"
+                            PRIx64 " recorded, no action taken", x[5]);
+            }
+            r->val = x[5];
+            status = HV_STATUS_SUCCESS;
+        }
+    }
 
     if (status == HV_STATUS_INVALID_HYPERCALL_CODE) {
         hv_arm_hcall_fn fn = hv_arm_hcall_handler(code);
@@ -1636,6 +1770,24 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
     }
 
     env->xregs[0] = (reps_completed << 32) | status;
+    if (code == 0x0050 && status == HV_STATUS_SUCCESS) {
+        /*
+         * One 128-bit value is one output pair in x15/x16. x1 to x4 carry the
+         * input and are left alone; TLFS keeps fast input registers unmodified.
+         */
+        uint64_t val[2] = { lo, hi };
+        unsigned pairs = 1;
+
+        if (reps_completed > pairs) {
+            warn_report_once("hyperv: fast register read completed %" PRIu64
+                             " reps but writes %u output pair(s)",
+                             reps_completed, pairs);
+        }
+        if (!hv_arm_fast_out(env->xregs, val, pairs)) {
+            warn_report_once("hyperv: %u fast output pair(s) do not fit"
+                             " x1 to x16", pairs);
+        }
+    }
 }
 
 int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
