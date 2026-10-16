@@ -22,6 +22,9 @@
 #include "qapi/error.h"
 #include "system/system.h"
 #include "system/runstate.h"
+#include "hw/hyperv/hyperv.h"
+#include "system/hw_accel.h"
+#include "hw/core/cpu.h"
 #include "system/ramblock.h"
 #include "system/kvm.h"
 #include "system/kvm_int.h"
@@ -42,6 +45,9 @@
 #include "hw/acpi/ghes.h"
 #include "target/arm/gtimer.h"
 #include "migration/blocker.h"
+#include "hw/hyperv/hyperv-vsm-proto.h"
+#include "hyperv-arm.h"
+#include "hw/arm/virt.h"
 
 const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
     KVM_CAP_INFO(DEVICE_CTRL),
@@ -594,6 +600,35 @@ int kvm_arch_get_default_type(MachineState *ms)
     return fixed_ipa ? 0 : size;
 }
 
+/*
+ * Forward the Hyper-V hypercall range (HVC #1, TLFS control word in x0) to
+ * userspace. The filter must be set before any vCPU runs or KVM returns
+ * -EBUSY.
+ */
+static int kvm_arm_hyperv_vm_init(KVMState *s)
+{
+    struct kvm_smccc_filter f = {
+        .base = 0x0,
+        .nr_functions = 0x20000,
+        .action = KVM_SMCCC_FILTER_FWD_TO_USER,
+    };
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VM_SMCCC_CTRL,
+        .attr = KVM_ARM_VM_SMCCC_FILTER,
+        .addr = (uint64_t)(uintptr_t)&f,
+    };
+    int ret;
+
+    ret = kvm_vm_ioctl(s, KVM_SET_DEVICE_ATTR, &attr);
+    if (ret < 0) {
+        error_report("hyperv: cannot forward the Hyper-V hypercall range: %s",
+                     strerror(-ret));
+        return ret;
+    }
+
+    return ret;
+}
+
 int kvm_arch_init(MachineState *ms, KVMState *s)
 {
     int ret = 0;
@@ -658,6 +693,10 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
     max_hw_bps = kvm_check_extension(s, KVM_CAP_GUEST_DEBUG_HW_BPS);
     hw_breakpoints = g_array_sized_new(true, true,
                                        sizeof(HWBreakpoint), max_hw_bps);
+
+    if (!ret && virt_hv_identity()) {
+        ret = kvm_arm_hyperv_vm_init(s);
+    }
 
     return ret;
 }
@@ -1544,6 +1583,50 @@ static bool kvm_arm_handle_debug(ARMCPU *cpu,
     return false;
 }
 
+/*
+ * Answer the VP-register hypercalls a Windows guest issues on the FADT
+ * Hyper-V path: register name in x3 low, Set value in x5. x0 =
+ * (reps_completed << 32) | status; KVM has advanced the PC.
+ */
+static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
+{
+    CPUARMState *env = &ARM_CPU(cs)->env;
+    uint64_t x[8];
+    uint16_t code;
+    uint64_t status = HV_STATUS_INVALID_HYPERCALL_CODE;
+    uint64_t reps_completed = 1;
+    uint16_t reps;
+    int i;
+
+    cpu_synchronize_state(cs);
+    for (i = 0; i < 8; i++) {
+        x[i] = env->xregs[i];
+    }
+    code = x[0] & 0xffff;
+    /*
+     * Control word: bit 16 selects the fast (register) form, bits 32-43 the
+     * rep count. In the memory form x1 and x2 are the input and output
+     * block addresses.
+     */
+    reps = (x[0] >> 32) & 0xfff;
+
+    if (status == HV_STATUS_INVALID_HYPERCALL_CODE) {
+        hv_arm_hcall_fn fn = hv_arm_hcall_handler(code);
+
+        if (fn) {
+            uint64_t res = fn(cs, run);
+
+            status = res & 0xffff;
+            /* reps_completed keeps its default for a non-rep call */
+            if (reps) {
+                reps_completed = (res >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+            }
+        }
+    }
+
+    env->xregs[0] = (reps_completed << 32) | status;
+}
+
 int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -1559,6 +1642,9 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         /* External DABT with no valid iss to decode */
         ret = kvm_arm_handle_dabt_nisv(cpu, run->arm_nisv.esr_iss,
                                        run->arm_nisv.fault_ipa);
+        break;
+    case KVM_EXIT_HYPERCALL:
+        kvm_arm_hv_hypercall(cs, run);
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "%s: un-handled exit reason %d\n",
