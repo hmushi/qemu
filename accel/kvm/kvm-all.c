@@ -574,7 +574,6 @@ static void kvm_alloc_vcpu_plane(CPUState *cpu, unsigned plane_id, int kvm_fd)
 
 void kvm_create_vcpu_plane(CPUState *cpu, unsigned plane_id)
 {
-    X86CPU *x86_cpu = X86_CPU(cpu);
     int plane_fd;
 
     if (kvm_get_or_create_plane_fd(cpu->kvm_state, plane_id) < 0) {
@@ -582,7 +581,8 @@ void kvm_create_vcpu_plane(CPUState *cpu, unsigned plane_id)
         abort();
     }
 
-    plane_fd = kvm_vm_plane_ioctl(cpu->kvm_state, plane_id, KVM_CREATE_VCPU, x86_cpu->apic_id);
+    plane_fd = kvm_vm_plane_ioctl(cpu->kvm_state, plane_id, KVM_CREATE_VCPU,
+                                  kvm_arch_vcpu_id(cpu));
     if (plane_fd < 0) {
         fprintf(stderr, "Failed to create plane vcpu\n");
         abort();
