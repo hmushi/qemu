@@ -1600,6 +1600,8 @@ static uint64_t hv_crash_regs[5]; /* GUEST_CRASH_P0..P4 */
 static struct hv_identity_reg hv_identity_regs[] = {
     { 0x90002, 0 }, /* GUEST_OS_ID */
     { 0x90007, 0 }, /* CPU_MANAGEMENT_VERSION */
+    { 0x90015, 0 }, /* partition info page */
+    { 0x90016, 0 }, /* partition info group */
     { 0x90017, 0 }, /* VP-info group member */
     { 0x40400, 0 }, /* SyntheticVbarEl1 */
     /* HvlConfigureMemoryZeroingOnReset; a reset policy nothing here acts on */
@@ -1735,6 +1737,14 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
         } else if (name == 0x40001) { /* HvArm64RegisterName MpidrEl1 */
             lo = ARM_CPU(cs)->mp_affinity | (1ULL << 31);
             status = HV_STATUS_SUCCESS;
+        } else if (name == 0x90015) {
+            /*
+             * Partition information page: the kernel maps whatever GET returns
+             * as a GPA and reads word 0. Report the overlay page, present.
+             */
+            hwaddr base = virt_hv_overlay_base();
+            lo = base ? (base | 1) : 0;
+            status = HV_STATUS_SUCCESS;
         } else if (name == 0x90007) {
             /*
              * CpuManagementVersion: bit 62 = version present. Gates the HAL
@@ -1754,6 +1764,20 @@ static void kvm_arm_hv_hypercall(CPUState *cs, struct kvm_run *run)
             status = HV_STATUS_SUCCESS;
         } else if (name == 0x215) { /* GUEST_CRASH_CTL notify */
             status = HV_STATUS_SUCCESS;
+        } else if (name == 0x90015) {
+            /*
+             * The guest publishes the page GPA here; winload writes a VA no IPA
+             * can reach. Alias the page so a reader of the published GPA sees
+             * the overlay zeros.
+             */
+            hwaddr gpa = x[5] & ~(hwaddr)0xfff;
+            bool enable = x[5] & 1;
+
+            r->val = x[5];
+            status = HV_STATUS_SUCCESS;
+            bql_lock(); /* memory topology change */
+            virt_hv_overlay_alias(gpa, enable);
+            bql_unlock();
         } else if (name == 0x90017) {
             /*
              * HvRegisterReferenceTsc: populate the reference TSC page so the
