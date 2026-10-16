@@ -28,6 +28,8 @@ void hyperv_sint_route_ref(HvSintRoute *sint_route);
 void hyperv_sint_route_unref(HvSintRoute *sint_route);
 
 int hyperv_sint_route_set_sint(HvSintRoute *sint_route);
+/* whether the route can raise its SINT (a GSI or a target SINT line) */
+bool hyperv_sint_route_armed(HvSintRoute *sint_route);
 
 /*
  * Submit a message to be posted in vcpu context.  If the submission succeeds,
