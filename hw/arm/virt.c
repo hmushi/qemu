@@ -1423,6 +1423,13 @@ static void create_gicv3(VirtMachineState *vms, MemoryRegion *mem)
     if (!kvm_irqchip_in_kernel() && !hvf_irqchip_in_kernel()) {
         qdev_prop_set_bit(vms->gic, "has-security-extensions", vms->secure);
     }
+    if (vms->gic_security_extn) {
+        if (!kvm_irqchip_in_kernel()) {
+            error_report("gic-security-extn needs the KVM in-kernel GICv3");
+            exit(1);
+        }
+        qdev_prop_set_bit(vms->gic, "kvm-security-extn", true);
+    }
 
     nb_redist_regions = virt_gicv3_redist_region_count(vms);
 
@@ -3586,6 +3593,20 @@ static void virt_set_acpi(Object *obj, Visitor *v, const char *name,
     visit_type_OnOffAuto(v, name, &vms->acpi, errp);
 }
 
+static bool virt_get_gic_security_extn(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->gic_security_extn;
+}
+
+static void virt_set_gic_security_extn(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->gic_security_extn = value;
+}
+
 static bool virt_get_ras(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -4293,6 +4314,16 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "default-bus-bypass-iommu",
                                           "Set on/off to enable/disable "
                                           "bypass_iommu for default root bus");
+
+    object_class_property_add_bool(oc, "gic-security-extn",
+                                   virt_get_gic_security_extn,
+                                   virt_set_gic_security_extn);
+    object_class_property_set_description(oc, "gic-security-extn",
+                                          "Set on to present the KVM GICv3 "
+                                          "distributor with two security "
+                                          "states, for guests that require "
+                                          "it such as Windows under a "
+                                          "Hyper-V identity");
 
     object_class_property_add_bool(oc, "ras", virt_get_ras,
                                    virt_set_ras);

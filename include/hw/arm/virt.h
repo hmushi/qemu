@@ -175,6 +175,7 @@ struct VirtMachineState {
     bool tcg_its;
     bool virt;
     bool ras;
+    bool gic_security_extn;
     bool mte;
     bool dtb_randomness;
     bool second_ns_uart_present;
