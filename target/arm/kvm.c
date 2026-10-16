@@ -602,8 +602,10 @@ int kvm_arch_get_default_type(MachineState *ms)
 
 /*
  * Forward the Hyper-V hypercall range (HVC #1, TLFS control word in x0) to
- * userspace. The filter must be set before any vCPU runs or KVM returns
- * -EBUSY.
+ * userspace, and give the whole VM one virtual counter offset. The filter
+ * must be set before any vCPU runs or KVM returns -EBUSY. Without the shared
+ * offset KVM sets a per-vCPU offset at each KVM_ARM_VCPU_INIT, so CNTVCT goes
+ * backwards across a VP's planes and the guest bugchecks 0x1DB.
  */
 static int kvm_arm_hyperv_vm_init(KVMState *s)
 {
@@ -617,6 +619,8 @@ static int kvm_arm_hyperv_vm_init(KVMState *s)
         .attr = KVM_ARM_VM_SMCCC_FILTER,
         .addr = (uint64_t)(uintptr_t)&f,
     };
+    struct kvm_arm_counter_offset off = { 0 };
+    uint64_t cnt;
     int ret;
 
     ret = kvm_vm_ioctl(s, KVM_SET_DEVICE_ATTR, &attr);
@@ -626,6 +630,13 @@ static int kvm_arm_hyperv_vm_init(KVMState *s)
         return ret;
     }
 
+    asm volatile("isb; mrs %0, cntvct_el0" : "=r"(cnt));
+    off.counter_offset = cnt;
+    ret = kvm_vm_ioctl(s, KVM_ARM_SET_COUNTER_OFFSET, &off);
+    if (ret < 0) {
+        error_report("hyperv: cannot set the VM counter offset: %s",
+                     strerror(-ret));
+    }
     return ret;
 }
 
