@@ -2,7 +2,7 @@
  * Hyper-V Virtual Secure Mode (VSM): target-neutral core
  *
  * Partition and per-VP VTL state, the VSM hypercalls that need only that
- * state and VINA. The target supplies its
+ * state, VINA and lower-VTL memory protections. The target supplies its
  * register file and VP assist page through HvVsmArchOps.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -107,8 +107,10 @@ MemTxResult vsm_physmem_read(CPUState *cs, hwaddr addr, void *buf,
                              hwaddr len);
 int highest_vtl(uint16_t set);
 
-/* system reset: scrub guest RAM */
+/* system reset: scrub guest RAM, lift one VTL's protection on a GFN range */
 void hyperv_vsm_zero_memory(void);
+int set_memory_attrs_range(uint8_t vtl, uint64_t start, uint64_t end,
+                           uint64_t attrs);
 
 /* HvRegisterVsmVina and the vina_asserted flag of the VTL control page */
 void set_vina(CPUState *cs, uint64_t data);
@@ -136,12 +138,31 @@ uint16_t hyperv_vsm_translate_gva(
         CPUState *cs,
         const struct hv_input_translate_virtual_address *in,
         struct hv_output_translate_virtual_address *out);
+/* SINT route callback of the intercept message route */
+void intercept_cb(void *data, int status);
 
 /* hypercall handlers, called from kvm_hv_handle_exit() */
 uint16_t hyperv_hcall_vtl_enable_partition_vtl(CPUState *cs, uint64_t param1,
                                                uint64_t param2, bool fast);
 uint16_t hyperv_hcall_vtl_enable_vp_vtl(CPUState *cs, uint64_t param,
                                         bool fast);
+/*
+ * HvCallModifyVtlProtectionMask, memory form: @control is the hypercall
+ * control word and @ingpa the input header followed by the GFN list.
+ * Returns an HV_STATUS_* code, or reps completed at
+ * HV_HYPERCALL_REP_COMP_OFFSET on success.
+ */
+uint64_t hyperv_hcall_vtl_protection_mask_mem(CPUState *cs, uint64_t control,
+                                              uint64_t ingpa);
+/*
+ * The register-fast form, for a target with no XMM: @regs holds @nregs
+ * input words, the two-word input header followed by the GFN list.
+ */
+uint64_t hyperv_hcall_vtl_protection_mask_regs(CPUState *cs, uint64_t control,
+                                               const uint64_t *regs,
+                                               unsigned nregs);
+/* the target VTL's SynIC can deliver now: post an intercept held for it */
+void hyperv_vsm_intercept_retry(CPUState *cs);
 /*
  * A VTL switch has no result of its own: it hands RAX and RCX over through
  * the VTL control page. @status carries a refusal instead.
@@ -151,13 +172,19 @@ int hyperv_hcall_vtl_return(CPUState *cs, uint64_t *status);
 uint64_t hyperv_hcall_get_set_vp_register(CPUState *cs,
                                           struct kvm_hyperv_exit *exit,
                                           bool set);
+uint64_t hyperv_hcall_vtl_protection_mask(CPUState *cs,
+                                          struct kvm_hyperv_exit *exit);
+
+/* RWX memory fault on a lower VTL: build and post the GPA intercept */
+int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
+                        uint64_t flags);
 
 /* @cs's VTL has VINA (TLFS 15.2.3) enabled and not yet asserted */
 bool hyperv_vsm_vina_armed(CPUState *cs);
 
 /*
  * Target hooks: the VP assist page, the register file behind
- * Get/SetVpRegisters and the VP start context.
+ * Get/SetVpRegisters and the VP start context, and memory intercepts.
  */
 typedef struct HvVsmArchOps {
     /* GPA of the VP assist page's vtl_control; the page is enabled */
@@ -171,6 +198,12 @@ typedef struct HvVsmArchOps {
                                 CPUState *target_vcpu);
     uint16_t (*set_vp_register)(uint32_t name, const struct hv_u128 *val,
                                 CPUState *target_vcpu, bool *dirty);
+    /* TLFS 15.10.2 GPA intercept message for a lower-VTL fault on @cs */
+    void (*build_memory_intercept)(CPUState *cs, struct hyperv_message *msg,
+                                   uint64_t gpa, uint64_t flags);
+    /* post @msg on SINT0 of @cs, the higher VTL vCPU of that VP */
+    int (*deliver_memory_intercept)(CPUState *cs,
+                                    const struct hyperv_message *msg);
     /*
      * Walk @target_vcpu's tables for @gva_page under @flags. Returns an
      * enum hv_translate_gva_result_code; on success *@gpa_page is the frame

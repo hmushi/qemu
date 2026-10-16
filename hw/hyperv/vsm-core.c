@@ -1,9 +1,9 @@
 /*
  * QEMU KVM Hyper-V Virtual Secure Mode (VSM): target-neutral core
  *
- * Partition and per-VP VTL state, the VSM hypercalls (TLFS chapter 15) and
- * VINA. KVM is reached only through the plane API, the target's register
- * file only through hv_vsm_arch_ops.
+ * Partition and per-VP VTL state, the VSM hypercalls (TLFS chapter 15), VINA
+ * and lower-VTL memory protections. KVM is reached only through the plane
+ * API, the target's register file only through hv_vsm_arch_ops.
  *
  * Based on the VSM series by Nicolas Saenz Julienne.
  *
@@ -792,4 +792,335 @@ uint16_t hyperv_vsm_translate_gva(
                                    out->translation_result.overlay_page,
                                    result);
     return HV_STATUS_SUCCESS;
+}
+
+/* the guest acknowledged the message that kept the slot busy: post again */
+static void intercept_repost_bh(void *data)
+{
+    VpVsmState *vpvsm = data;
+    int ret;
+
+    if (!vpvsm->intercept_route) {
+        return;
+    }
+    ret = hyperv_post_msg(vpvsm->intercept_route, &vpvsm->intercept_msg);
+    if (ret) {
+        /* the staging area is still busy: keep the message for the next try */
+        vpvsm->intercept_pending = true;
+        qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: VP %u VTL%d intercept "
+                      "message could not be reposted, status %d\n",
+                      hyperv_vp_index(vpvsm->cs), active_vtl(vpvsm->cs), ret);
+    }
+}
+
+/*
+ * Keep a message that did not reach the slot: the lower VTL repeats the
+ * faulting instruction, so waiting loses nothing and dropping loses the fault.
+ */
+static void intercept_hold(VpVsmState *vpvsm, int status, const char *why)
+{
+    vpvsm->intercept_pending = true;
+    qemu_log_mask(LOG_UNIMP, "hyperv-vsm: VP %u VTL%d intercept message held,"
+                  " %s (status %d)\n", hyperv_vp_index(vpvsm->cs),
+                  active_vtl(vpvsm->cs), why, status);
+}
+
+/*
+ * @cs's SynIC can deliver now. Post the held intercept from the main loop,
+ * because the caller may be a vCPU thread mid-hypercall.
+ */
+void hyperv_vsm_intercept_retry(CPUState *cs)
+{
+    VpVsmState *vpvsm = get_vp_vsm(cs);
+
+    if (!vpvsm || !vpvsm->intercept_pending || !vpvsm->intercept_route) {
+        return;
+    }
+    vpvsm->intercept_pending = false;
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), intercept_repost_bh,
+                            vpvsm);
+}
+
+/*
+ * Completion of an intercept post, @status as cpu_post_msg() reports it. No
+ * status drops the message.
+ */
+void intercept_cb(void *data, int status)
+{
+    VpVsmState *vpvsm = data;
+
+    switch (status) {
+    case 0:
+        /*
+         * In the slot. A synchronous intercept needs no SINT line: the VTL
+         * switch after the fault is the notification.
+         */
+        vpvsm->intercept_pending = false;
+        return;
+
+    case -EAGAIN:
+        /*
+         * The slot is busy and flagged pending, so the guest's EOM completes
+         * this route. The staging slot is not free yet, so a post from here
+         * would fail: repost from the main loop.
+         */
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), intercept_repost_bh,
+                                vpvsm);
+        return;
+
+    case -ENXIO:
+        /*
+         * The target VTL has not enabled its message page. Hold the message
+         * until it does; hyperv_vsm_intercept_retry() posts it then.
+         */
+        intercept_hold(vpvsm, status, "the target VTL has no message page");
+        return;
+
+    default:
+        /* the SINT line could not be raised, or an unmodelled refusal */
+        intercept_hold(vpvsm, status, "the SynIC did not take the message");
+        return;
+    }
+}
+
+int kvm_hv_handle_fault(CPUState *cs, uint64_t gpa, uint64_t size,
+                        uint64_t flags)
+{
+    int vtl = active_vtl(cs);
+    GHashTable *prots = hv_vsm.prots[vtl];
+    uint64_t gfn = gpa >> HV_HYP_PAGE_SHIFT;
+    struct hyperv_message msg = {};
+    CPUState *next;
+    uint64_t prot;
+
+    if (!prots || !g_hash_table_contains(prots, GUINT_TO_POINTER(gfn))) {
+        qemu_log_mask(LOG_GUEST_ERROR, "hyperv-vsm: unexpected memory fault on "
+                      "VP %u VTL%d gpa 0x%" PRIx64 " size 0x%" PRIx64
+                      " flags 0x%" PRIx64 "\n", hyperv_vp_index(cs), vtl, gpa,
+                      size, flags);
+        return -1;
+    }
+
+    prot = GPOINTER_TO_UINT(g_hash_table_lookup(prots, GUINT_TO_POINTER(gfn)));
+    trace_hyperv_vsm_handle_fault(hyperv_vp_index(cs), vtl, gpa, size, flags,
+                                  prot);
+
+    next = sibling(cs, vtl + 1);
+    if (!next) {
+        return -1;
+    }
+
+    cpu_synchronize_state(cs);
+    hv_vsm_arch_ops.build_memory_intercept(cs, &msg, gpa, flags);
+    if (hv_vsm_arch_ops.deliver_memory_intercept(next, &msg)) {
+        return -1;
+    }
+
+    return hv_plane_run_vtl(cs, vtl + 1, HV_PLANE_SWITCH_INTERCEPT);
+}
+
+/* HV_MAP_GPA_* permissions to plane access restrictions */
+static uint64_t map_flags_to_memattrs(uint32_t flags)
+{
+    uint64_t attrs = KVM_MEMORY_ATTRIBUTE_NR | KVM_MEMORY_ATTRIBUTE_NW |
+                     KVM_MEMORY_ATTRIBUTE_NX;
+
+    if (flags & HV_MAP_GPA_READABLE) {
+        attrs &= ~KVM_MEMORY_ATTRIBUTE_NR;
+    }
+    if (flags & HV_MAP_GPA_WRITABLE) {
+        attrs &= ~KVM_MEMORY_ATTRIBUTE_NW;
+    }
+    if (flags & HV_MAP_GPA_EXECUTABLE) {
+        attrs &= ~KVM_MEMORY_ATTRIBUTE_NX;
+    }
+
+    return attrs;
+}
+
+int set_memory_attrs_range(uint8_t vtl, uint64_t start, uint64_t end,
+                                  uint64_t attrs)
+{
+    hwaddr addr = start << HV_HYP_PAGE_SHIFT;
+    hwaddr size = (end - start) << HV_HYP_PAGE_SHIFT;
+    int ret;
+
+    trace_hyperv_vsm_set_memory_attrs(vtl, addr, size, attrs);
+    ret = hv_plane_set_memory_attrs(vtl, addr, size, attrs);
+    if (ret) {
+        qemu_log_mask(LOG_UNIMP, "hyperv-vsm: cannot set attrs 0x%" PRIx64
+                      " on VTL%d [0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx
+                      "): %d\n", attrs, vtl, addr, addr + size, ret);
+    }
+    return ret;
+}
+
+/* Apply @flags to the sorted @gfn_list for @vtl, coalescing contiguous GFNs */
+static int set_memory_attrs(uint8_t vtl, uint32_t flags, uint16_t count,
+                            const uint64_t *gfn_list)
+{
+    uint64_t attrs = map_flags_to_memattrs(flags);
+    uint64_t start, end;
+    int i, ret;
+
+    if (!hv_vsm.prots[vtl]) {
+        hv_vsm.prots[vtl] = g_hash_table_new(g_direct_hash, g_direct_equal);
+    }
+
+    start = gfn_list[0];
+    end = start + 1;
+    for (i = 1; i < count; i++) {
+        if (gfn_list[i] == end) {
+            end++;
+            continue;
+        }
+        ret = set_memory_attrs_range(vtl, start, end, attrs);
+        if (ret) {
+            return ret;
+        }
+        start = gfn_list[i];
+        end = start + 1;
+    }
+    ret = set_memory_attrs_range(vtl, start, end, attrs);
+    if (ret) {
+        return ret;
+    }
+
+    for (i = 0; i < count; i++) {
+        g_hash_table_insert(hv_vsm.prots[vtl], GUINT_TO_POINTER(gfn_list[i]),
+                            GUINT_TO_POINTER(flags));
+    }
+
+    return 0;
+}
+
+/* Shared tail of both input forms: @count GFNs of @gfn_list under @input */
+static uint64_t
+vtl_protection_mask_apply(CPUState *cs,
+                          const union hv_modify_vtl_protection_mask *input,
+                          uint16_t count, const uint64_t *gfn_list)
+{
+    uint8_t target_vtl;
+
+    trace_hyperv_vsm_hcall_vtl_protection_mask(input->target_partition_id,
+                                               input->map_flags,
+                                               input->input_vtl.target_vtl,
+                                               count);
+
+    if (input->target_partition_id != HV_PARTITION_ID_SELF) {
+        return HV_STATUS_INVALID_PARTITION_ID;
+    }
+
+    /* protections apply to a lower VTL; default is the one right below */
+    if (input_vtl_targets(input->input_vtl)) {
+        target_vtl = input->input_vtl.target_vtl;
+        if (target_vtl >= active_vtl(cs)) {
+            return HV_STATUS_ACCESS_DENIED;
+        }
+    } else {
+        if (active_vtl(cs) == 0) {
+            return HV_STATUS_INVALID_PARAMETER;
+        }
+        target_vtl = active_vtl(cs) - 1;
+    }
+
+    if (target_vtl >= HV_NUM_VTLS) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    if (set_memory_attrs(target_vtl, input->map_flags, count, gfn_list)) {
+        return HV_STATUS_INVALID_PARAMETER;
+    }
+
+    return (uint64_t)count << HV_HYPERCALL_REP_COMP_OFFSET;
+}
+
+/*
+ * Rep start and reps completed mean what they do in the memory form: the
+ * GFN list is indexed by rep.
+ */
+uint64_t hyperv_hcall_vtl_protection_mask_regs(CPUState *cs, uint64_t control,
+                                               const uint64_t *regs,
+                                               unsigned nregs)
+{
+    const unsigned hdr = sizeof(union hv_modify_vtl_protection_mask) /
+                         sizeof(uint64_t);
+    union hv_modify_vtl_protection_mask input;
+    unsigned first;
+    uint16_t count;
+
+    /* the list is not in memory, so a window too short is a refusal */
+    if (!hv_hcall_rep_regs_window(control, nregs, hdr, &first, &count)) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    input.as_uint64[0] = regs[0];
+    input.as_uint64[1] = regs[1];
+
+    return vtl_protection_mask_apply(cs, &input, count, regs + first);
+}
+
+uint64_t hyperv_hcall_vtl_protection_mask_mem(CPUState *cs, uint64_t control,
+                                              uint64_t ingpa)
+{
+    uint16_t rep_cnt = (control >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+    uint16_t rep_idx = (control >> HV_HYPERCALL_REP_START_OFFSET) & 0xfff;
+    union hv_modify_vtl_protection_mask input;
+    g_autofree uint64_t *gfn_list = NULL;
+    uint16_t count;
+
+    if (rep_idx >= rep_cnt) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+    count = rep_cnt - rep_idx;
+
+    if (vsm_physmem_read(cs, ingpa, &input, sizeof(input)) != MEMTX_OK) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    gfn_list = g_new0(uint64_t, count);
+    ingpa += sizeof(input) + rep_idx * sizeof(*gfn_list);
+    if (vsm_physmem_read(cs, ingpa, gfn_list,
+                         count * sizeof(*gfn_list)) != MEMTX_OK) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    return vtl_protection_mask_apply(cs, &input, count, gfn_list);
+}
+
+uint64_t hyperv_hcall_vtl_protection_mask(CPUState *cs,
+                                          struct kvm_hyperv_exit *exit)
+{
+    uint64_t in = exit->u.hcall.input;
+    uint16_t rep_cnt = (in >> HV_HYPERCALL_REP_COMP_OFFSET) & 0xfff;
+    uint16_t rep_idx = (in >> HV_HYPERCALL_REP_START_OFFSET) & 0xfff;
+    union hv_modify_vtl_protection_mask input;
+    g_autofree uint64_t *gfn_list = NULL;
+    uint16_t count, i;
+
+    if (!(in & HV_HYPERCALL_FAST)) {
+        return hyperv_hcall_vtl_protection_mask_mem(cs, in,
+                                                    exit->u.hcall.params[0]);
+    }
+
+    if (rep_idx >= rep_cnt) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+    count = rep_cnt - rep_idx;
+
+    input.as_uint64[0] = exit->u.hcall.params[0];
+    input.as_uint64[1] = exit->u.hcall.params[1];
+
+    /* GFNs travel in XMM; everything is consumed at once */
+    if (!hv_exit_has_xmm(exit) || rep_idx != 0 ||
+        count > 2 * HV_HYPERCALL_MAX_XMM_REGISTERS) {
+        return HV_STATUS_INVALID_HYPERCALL_INPUT;
+    }
+
+    gfn_list = g_new0(uint64_t, count);
+    for (i = 0; i < count; i++) {
+        gfn_list[i] = hv_exit_xmm_get(exit, i);
+    }
+
+    return vtl_protection_mask_apply(cs, &input, count, gfn_list);
 }

@@ -50,6 +50,9 @@ hyperv_vsm_hcall_enable_vp_vtl(uint64_t partition_id, uint32_t vp_index, uint8_t
 hyperv_vsm_hcall_vtl_call(uint32_t vp_index, int vtl) "VP %u from VTL%d"
 hyperv_vsm_hcall_vtl_return(uint32_t vp_index, int vtl) "VP %u from VTL%d"
 hyperv_vsm_hcall_get_set_vp_registers(uint64_t partition_id, uint32_t vp_index, uint8_t target_vtl, int active_vtl, uint16_t count, bool set, uint32_t caller_vp) "partition 0x%" PRIx64 " VP %u target VTL%u from VTL%d count %u set %d caller VP %u"
+hyperv_vsm_hcall_vtl_protection_mask(uint64_t partition_id, uint32_t map_flags, uint8_t target_vtl, uint16_t count) "partition 0x%" PRIx64 " map flags 0x%x target VTL%u count %u"
+hyperv_vsm_set_memory_attrs(uint8_t vtl, uint64_t addr, uint64_t size, uint64_t attrs) "VTL%u [0x%" PRIx64 " +0x%" PRIx64 ") attrs 0x%" PRIx64
+hyperv_vsm_handle_fault(uint32_t vp_index, int vtl, uint64_t gpa, uint64_t size, uint64_t flags, uint64_t prot) "VP %u VTL%d gpa 0x%" PRIx64 " size 0x%" PRIx64 " flags 0x%" PRIx64 " prot 0x%" PRIx64
 hyperv_vsm_enable_vp_vtl_reject(const char *why, uint32_t vp_index, uint8_t vtl) "rejected: %s (VP %u VTL%u)"
 hyperv_vsm_vina_config(uint32_t vp_index, int vtl, uint64_t val) "VP %u VTL%d VINA 0x%" PRIx64
 hyperv_vsm_vp_register_hcall_reject(const char *why, uint16_t rep_cnt, uint16_t rep_idx, bool fast, bool set, uint32_t caller_vp, int caller_vtl, uint64_t status) "rejected: %s rep_cnt %u rep_idx %u fast %d set %d caller VP %u VTL%d status 0x%" PRIx64
